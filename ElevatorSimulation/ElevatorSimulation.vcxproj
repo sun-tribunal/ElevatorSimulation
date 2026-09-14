@@ -281,6 +281,10 @@
     <None Include="..\Tests\FleetRebalancerTests.cpp" />
     <None Include="..\Tests\ElevatorTests.cpp" />
     <None Include="..\Tests\SimulationTests.cpp" />
+    <None Include="..\Tests\FloorTests.cpp" />
+    <None Include="..\Tests\StatisticsTests.cpp" />
+    <None Include="..\Tests\SystemTests.cpp" />
+    <None Include="..\Tests\ReliabilityTests.cpp" />
     <None Include="..\Tests\ConcurrencyTests.cpp" />
     <None Include="..\Tests\DispatchPerformance.cpp" />
     <None Include="..\Tests\RunDispatchPerformance.ps1" />

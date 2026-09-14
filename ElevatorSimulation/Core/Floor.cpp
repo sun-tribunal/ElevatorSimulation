@@ -2,6 +2,7 @@
 
 #include <stdexcept>
 #include <algorithm>
+#include <unordered_set>
 
 Floor::Floor(int floorNumber) : m_floorNumber(floorNumber)
 {
@@ -44,4 +45,27 @@ const std::deque<PassengerId>& Floor::GetWaitingIds(Direction direction) const
     if (direction == Direction::Up) return m_upWaitingPassengers;
     if (direction == Direction::Down) return m_downWaitingPassengers;
     throw std::invalid_argument("等待队列方向必须为上行或下行");
+}
+
+bool Floor::EnqueueBatch(const std::vector<PassengerId>& ids, Direction direction)
+{
+    if (direction != Direction::Up && direction != Direction::Down) return false;
+    // 先校验全部 id，通过后再统一入队，保证整批成功或整批失败，不留下部分状态。
+    std::unordered_set<PassengerId> seen;
+    seen.reserve(ids.size());
+    for (PassengerId id : ids)
+    {
+        if (id < 0 || Contains(id) || !seen.insert(id).second) return false;
+    }
+    auto& queue = direction == Direction::Up ? m_upWaitingPassengers : m_downWaitingPassengers;
+    queue.insert(queue.end(), ids.begin(), ids.end());
+    return true;
+}
+
+bool Floor::Contains(PassengerId id) const noexcept
+{
+    if (id < 0) return false;
+    for (const auto* queue : { &m_upWaitingPassengers, &m_downWaitingPassengers })
+        if (std::find(queue->begin(), queue->end(), id) != queue->end()) return true;
+    return false;
 }
