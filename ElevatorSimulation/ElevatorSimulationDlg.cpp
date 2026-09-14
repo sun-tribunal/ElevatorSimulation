@@ -1,4 +1,4 @@
-﻿
+
 // ElevatorSimulationDlg.cpp: 实现文件
 //
 
@@ -43,6 +43,12 @@ namespace
 		L"上下客时间（秒）", L"客流率（人/仿真秒）", L"客流场景", L"客流模式",
 		L"总时长（秒）", L"随机种子", L"仿真倍速"
 	};
+
+	// 倍速滑块：位置区间映射到 [0.1x, 20.0x] 的线性刻度，滑块每格 0.1x。
+	constexpr int kSpeedSliderMin = 1;
+	constexpr int kSpeedSliderMax = 200;
+	constexpr double kSpeedSliderStep = 0.1;
+	constexpr int kSpeedSliderDefaultPos = 10; // 1.0x。
 
 	const wchar_t* DirectionText(Direction direction)
 	{
@@ -195,12 +201,9 @@ BEGIN_MESSAGE_MAP(CElevatorSimulationDlg, CDialogEx)
 	ON_BN_CLICKED(IDC_BUTTON_PAUSE, &CElevatorSimulationDlg::OnBnClickedPause)
 	ON_BN_CLICKED(IDC_BUTTON_RESUME, &CElevatorSimulationDlg::OnBnClickedResume)
 	ON_BN_CLICKED(IDC_BUTTON_RESET, &CElevatorSimulationDlg::OnBnClickedReset)
-	ON_BN_CLICKED(IDC_BUTTON_SPEED_1, &CElevatorSimulationDlg::OnBnClickedSpeed1)
-	ON_BN_CLICKED(IDC_BUTTON_SPEED_2, &CElevatorSimulationDlg::OnBnClickedSpeed2)
-	ON_BN_CLICKED(IDC_BUTTON_SPEED_5, &CElevatorSimulationDlg::OnBnClickedSpeed5)
-	ON_BN_CLICKED(IDC_BUTTON_SPEED_10, &CElevatorSimulationDlg::OnBnClickedSpeed10)
 	ON_BN_CLICKED(IDC_BUTTON_ADD_PASSENGERS,
 		&CElevatorSimulationDlg::OnBnClickedAddPassengers)
+	ON_WM_HSCROLL()
 	ON_EN_CHANGE(IDC_EDIT_MANUAL_FLOOR, &CElevatorSimulationDlg::OnEnChangeManualFloor)
 	ON_CBN_SELCHANGE(IDC_COMBO_TRAFFIC_SCENARIO,
 		&CElevatorSimulationDlg::OnCbnSelchangeTrafficScenario)
@@ -268,6 +271,7 @@ BOOL CElevatorSimulationDlg::OnInitDialog()
 	m_manualUpEdit.SetWindowTextW(L"1");
 	m_manualDownEdit.SetWindowTextW(L"0");
 	m_uiReady = true;
+	m_speedSlider.SetPos(kSpeedSliderDefaultPos);
 	UpdateSpeedDisplay(1.0);
 	UpdateTabPageVisibility();
 
@@ -391,13 +395,12 @@ void CElevatorSimulationDlg::CreateUIFramework()
 			ParameterLabelIds[index]);
 	}
 
-	constexpr const wchar_t* SpeedLabels[] = { L"1 倍", L"2 倍", L"5 倍", L"10 倍" };
-	for (std::size_t index = 0; index < m_speedButtons.size(); ++index)
-	{
-		m_speedButtons[index].Create(SpeedLabels[index],
-			WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, CRect(), this,
-			IDC_BUTTON_SPEED_1 + static_cast<UINT>(index));
-	}
+	m_speedSlider.Create(WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_AUTOTICKS,
+		CRect(), this, IDC_SLIDER_SPEED);
+	m_speedSlider.SetRange(kSpeedSliderMin, kSpeedSliderMax, TRUE);
+	m_speedSlider.SetTicFreq(10);
+	m_speedSlider.SetPageSize(10);
+	m_speedSlider.SetLineSize(1);
 
 	m_rightTabs.Create(WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS |
 		TCS_TABS | TCS_SINGLELINE,
@@ -597,13 +600,7 @@ void CElevatorSimulationDlg::RelayoutUI()
 	move(IDC_BUTTON_RESET, leftInnerX + actionWidth + 8, actionY + 42, actionWidth, 34);
 
 	place(m_speedSection, leftInnerX, speedY, leftInnerWidth, 22);
-	const int speedButtonWidth = (leftInnerWidth - 12) / 4;
-	for (std::size_t index = 0; index < m_speedButtons.size(); ++index)
-	{
-		place(m_speedButtons[index], leftInnerX +
-			static_cast<int>(index) * (speedButtonWidth + 4), speedButtonY,
-			speedButtonWidth, 32);
-	}
+	place(m_speedSlider, leftInnerX, speedButtonY, leftInnerWidth, 34);
 
 	const int legendPreferredWidth = 320;
 	const int pageTabsMinimumWidth = 260;
@@ -820,16 +817,49 @@ void CElevatorSimulationDlg::OnGetMinMaxInfo(MINMAXINFO* lpMMI)
 	lpMMI->ptMinTrackSize.y = MulDiv(760, dpi, 96);
 }
 
-void CElevatorSimulationDlg::SetSpeedPreset(const wchar_t* speedText)
+double CElevatorSimulationDlg::SpeedFromSlider(int position) const
 {
-	SetDlgItemTextW(IDC_EDIT_SPEED, speedText);
-	UpdateSpeedDisplay(_wtof(speedText));
+	return position * kSpeedSliderStep;
 }
 
-void CElevatorSimulationDlg::OnBnClickedSpeed1() { SetSpeedPreset(L"1"); }
-void CElevatorSimulationDlg::OnBnClickedSpeed2() { SetSpeedPreset(L"2"); }
-void CElevatorSimulationDlg::OnBnClickedSpeed5() { SetSpeedPreset(L"5"); }
-void CElevatorSimulationDlg::OnBnClickedSpeed10() { SetSpeedPreset(L"10"); }
+int CElevatorSimulationDlg::SliderFromSpeed(double speed) const
+{
+	const double clamped = (std::max)(kSpeedSliderMin * kSpeedSliderStep,
+		(std::min)(speed, kSpeedSliderMax * kSpeedSliderStep));
+	return (std::max)(kSpeedSliderMin,
+		(std::min)(kSpeedSliderMax, static_cast<int>(std::lround(clamped / kSpeedSliderStep))));
+}
+
+void CElevatorSimulationDlg::OnHScroll(UINT nSBCode, UINT /*nPos*/, CScrollBar* pScrollBar)
+{
+	if (pScrollBar == nullptr ||
+		pScrollBar->GetDlgCtrlID() != IDC_SLIDER_SPEED)
+		return;
+	if (nSBCode == SB_THUMBTRACK)
+		m_speedSliderDragging = true;
+	else if (nSBCode == SB_ENDSCROLL)
+		m_speedSliderDragging = false;
+	const double speed = SpeedFromSlider(m_speedSlider.GetPos());
+	ApplySimulationSpeed(speed);
+}
+
+void CElevatorSimulationDlg::ApplySimulationSpeed(double speed)
+{
+	if (!m_uiReady || !m_simulationWorker)
+		return;
+	// 同步到配置编辑框与头部显示；若正在运行/暂停则实时生效到仿真线程。
+	const auto snapshot = m_simulationWorker->GetLatestSnapshot();
+	const bool active = snapshot && snapshot->workerActive;
+	const bool liveChange = active &&
+		(snapshot->state == SimulationState::Running ||
+			snapshot->state == SimulationState::Paused);
+	CString text;
+	text.Format(L"%g", speed);
+	SetDlgItemTextW(IDC_EDIT_SPEED, text);
+	UpdateSpeedDisplay(speed);
+	if (liveChange)
+		m_simulationWorker->SetSimulationSpeed(speed);
+}
 
 void CElevatorSimulationDlg::OnTcnSelchangeLeftTabs(NMHDR*, LRESULT* pResult)
 {
@@ -1142,8 +1172,17 @@ void CElevatorSimulationDlg::UpdateControlStates(
 	const bool fixedScenario =
 		m_trafficScenarioCombo.GetCurSel() == static_cast<int>(TrafficScenario::Fixed);
 	m_trafficPatternCombo.EnableWindow(active && ready && fixedScenario);
-	for (auto& speedButton : m_speedButtons)
-		speedButton.EnableWindow(active && ready);
+	const bool finished = state == SimulationState::Finished;
+	// 倍速滑块在就绪/运行/暂停时都可调；运行与暂停实时生效，就绪时写入配置。
+	m_speedSlider.EnableWindow(active && !finished);
+	// 就绪时快照仍是旧默认值，不能用来覆盖滑块；运行/暂停时才由快照驱动，
+	// 用户拖动期间不覆盖，避免回弹。
+	if (active && snapshot && !ready && !finished && !m_speedSliderDragging)
+	{
+		m_speedSlider.SetPos(std::clamp(
+			SliderFromSpeed(snapshot->config.simulationSpeed),
+			kSpeedSliderMin, kSpeedSliderMax));
+	}
 	UpdateManualDirectionLocks(snapshot, false);
 }
 

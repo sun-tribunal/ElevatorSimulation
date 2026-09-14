@@ -65,6 +65,14 @@ void SimulationWorker::AddPassengers(int startFloor, int upCount, int downCount)
     Enqueue(command);
 }
 
+void SimulationWorker::SetSimulationSpeed(double speed)
+{
+    Command command;
+    command.type = CommandType::SetSimulationSpeed;
+    command.speed = speed;
+    Enqueue(command);
+}
+
 void SimulationWorker::ObserveHallCall(int floor, Direction direction)
 {
     Enqueue({ CommandType::ObserveHallCall, floor, direction });
@@ -167,6 +175,9 @@ void SimulationWorker::ThreadMain()
                         simulation.AddPassengersAtFloor(
                             command.floor, Direction::Down, command.downCount);
                     observationRequested = observedHallCall.has_value();
+                    break;
+                case CommandType::SetSimulationSpeed:
+                    simulation.SetSimulationSpeed(command.speed);
                     break;
                 case CommandType::ObserveHallCall:
                     observedHallCall = std::make_pair(command.floor, command.direction);

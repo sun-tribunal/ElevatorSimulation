@@ -52,11 +52,8 @@ protected:
 	afx_msg void OnBnClickedPause();
 	afx_msg void OnBnClickedResume();
 	afx_msg void OnBnClickedReset();
-	afx_msg void OnBnClickedSpeed1();
-	afx_msg void OnBnClickedSpeed2();
-	afx_msg void OnBnClickedSpeed5();
-	afx_msg void OnBnClickedSpeed10();
 	afx_msg void OnBnClickedAddPassengers();
+	afx_msg void OnHScroll(UINT nSBCode, UINT nPos, CScrollBar* pScrollBar);
 	afx_msg void OnEnChangeManualFloor();
 	afx_msg void OnCbnSelchangeTrafficScenario();
 	afx_msg void OnBnClickedPanelToggle();
@@ -135,7 +132,7 @@ private:
 	CStatic m_controlSection;
 	CStatic m_speedSection;
 	std::array<CStatic, 11> m_parameterLabels;
-	std::array<CButton, 4> m_speedButtons;
+	CSliderCtrl m_speedSlider;
 	DashboardKpiBar m_kpiBar;
 	bool m_uiReady = false;
 	bool m_rightPanelExpanded = true;
@@ -151,6 +148,7 @@ private:
 	std::optional<HallCallIdentity> m_observedHallCall;
 	std::shared_ptr<const DispatchObservationSnapshot> m_lastRenderedObservation;
 	bool m_rebuildingHallCallList = false;
+	bool m_speedSliderDragging = false;
 
 	void CreateUIFramework();
 	void InitializeListControls();
@@ -173,8 +171,10 @@ private:
 	void RefreshObservationViews(bool forceRefresh = false);
 	void ShowObservationEmptyState(const wchar_t* message);
 	void PopulateObservationViews(const DispatchObservationSnapshot& observation);
-	void SetSpeedPreset(const wchar_t* speedText);
 	void UpdateSpeedDisplay(double speed);
+	double SpeedFromSlider(int position) const;
+	int SliderFromSpeed(double speed) const;
+	void ApplySimulationSpeed(double speed);
 	bool ReadConfiguration(SimulationConfig& config, std::uint32_t& seed);
 	bool ReadIntControl(int controlId, const wchar_t* fieldName, int& value);
 	bool ReadDoubleControl(int controlId, const wchar_t* fieldName, double& value);

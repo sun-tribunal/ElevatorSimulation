@@ -1,4 +1,4 @@
-﻿//{{NO_DEPENDENCIES}}
+//{{NO_DEPENDENCIES}}
 // Microsoft Visual C++ 生成的包含文件。
 // 由 ElevatorSimulation.rc 使用
 //
@@ -85,6 +85,7 @@
 #define IDC_EDIT_MANUAL_DOWN               1131
 #define IDC_BUTTON_ADD_PASSENGERS           1132
 #define IDC_MANUAL_FEEDBACK                 1133
+#define IDC_SLIDER_SPEED                    1134
 
 // 新对象的下一组默认值
 //
@@ -92,7 +93,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 
 #define _APS_NEXT_RESOURCE_VALUE	129
-#define _APS_NEXT_CONTROL_VALUE		1134
+#define _APS_NEXT_CONTROL_VALUE		1135
 #define _APS_NEXT_SYMED_VALUE		101
 #define _APS_NEXT_COMMAND_VALUE		32771
 #endif

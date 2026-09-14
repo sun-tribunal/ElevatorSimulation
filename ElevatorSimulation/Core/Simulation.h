@@ -29,6 +29,10 @@ public:
     void Resume(); // 仅 Paused -> Running。
     void Reset(); // 以最近一次有效参数重新初始化；未初始化时无操作。
 
+    // 运行时修改仿真倍速：只影响后续 Update 的时间缩放，不重置时钟或重建状态。
+    // 合法值必须为有限正数；非法值返回 false 且保持原倍速不变。
+    bool SetSimulationSpeed(double speed) noexcept;
+
     // deltaTime 是真实经过的秒数，内部只乘一次 simulationSpeed。
     // 以事件边界推进整个群组，所有核心事件仅使用仿真秒。
     void Update(double deltaTime);

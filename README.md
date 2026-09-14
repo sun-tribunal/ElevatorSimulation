@@ -134,6 +134,7 @@ Snapshot 按值构造：`SimulationWorker` 将 UI 所需的 `SimulationUISnapsho
 | `GetFloorCoverageSnapshots()` | 用当前完整调度快照和 Dispatcher LOOK ETA 返回全楼预测覆盖 |
 | `GetStatisticsSnapshot()` | 返回真实事件累计统计副本 |
 | `Initialize(config, seed)` / `GetRandomSeed()` | 固定种子初始化或读取本轮种子，便于复现 |
+| `SetSimulationSpeed(speed)` | 运行/暂停等任意状态下实时修改倍速，只影响后续 Update 的时间缩放；非法值（非有限正数）返回 false 且保持原倍速 |
 | `AddPassenger(start, target)` | 当前时刻手工注入乘客，非法输入返回 InvalidPassengerId |
 | `GetPassengerSnapshots()` / `GetHallCallSnapshots()` | 读取活动乘客及外呼唯一归属副本 |
 | `ValidateState()` | 只读检查人数守恒、ID 所有权和外呼归属 |
@@ -141,6 +142,7 @@ Snapshot 按值构造：`SimulationWorker` 将 UI 所需的 `SimulationUISnapsho
 | `GetUISnapshot()` | 由 Worker 线程构造 UI 所需只读副本，含当前 Coverage、楼层历史统计和客流阶段；乘客明细按需使用独立接口 |
 | `GetDispatchObservation(floor, direction)` | 只读返回真实 Hall Call 的单梯候选评分；请求不存在时返回 invalid |
 | `SimulationWorker::{Start,Pause,Resume,Reset,Stop}` | 将控制命令按 FIFO 交给工作线程；Stop 正常 join |
+| `SimulationWorker::SetSimulationSpeed(speed)` | 入队倍速修改命令，工作线程在真实 Simulation 上实时生效，无需重置 |
 | `SimulationWorker::GetLatestSnapshot()` | UI 线程原子读取最近发布的不可变快照 |
 | `SimulationWorker::{ObserveHallCall,ClearObservedHallCall,GetLatestObservation}` | Worker 线程最多约 5Hz 计算并原子发布只读观察快照 |
 
@@ -297,6 +299,7 @@ Hall Call 动态改派只由新乘客、到层、上下客完成和零耗时状�
 
 - 参数区提供楼层数 L、电梯数 N、容量 K、每层运行时间 S、每人上下客时间 T、总时长、全楼乘客产生率、客流场景、客流模式、仿真倍速与固定 seed。场景可选“固定模式”或“办公楼日周期”；OfficeDay 会禁用模式下拉框，由事件阶段自动选择早高峰、日间层间、晚高峰。顶部实时显示当前场景/阶段。所有参数仍仅在 Ready 时可修改，UI 只做严格转换，核心统一校验。
 - 控制区提供开始、暂停、继续和重置。按钮及参数编辑框随 `Ready`、`Running`、`Paused`、`Finished` 状态启用或禁用；Finished 保留最终快照，必须 Reset 后才能开始下一轮。
+- 仿真倍速由一个 0.1~20 倍的横向滑块控制（类似播放器倍速条），在就绪、运行与暂停状态都可拖动：运行/暂停时通过 `SimulationWorker::SetSimulationSpeed` 实时生效并同步头部显示，不要求先停止仿真；就绪时写入参数供 Start 使用。滑块位置自动跟随当前仿真倍速，用户拖动期间不被快照覆盖，避免回弹。
 - “手动客流”页可在 Running 或 Paused 状态输入出发楼层、上行人数和下行人数，单方向每次最多 500 人。1 层的下行输入和最高层的上行输入会自动归零并锁定；核心接口也会再次拒绝非法边界方向。`SimulationWorker` 只负责把命令送入模型线程；`Simulation::AddPassengersAtFloor` 在对应方向的有效楼层中生成目的层，UI 不保存或修改乘客对象。
 - 对话框使用 33 ms MFC Timer，只读取最新 `SimulationUISnapshot` 并更新控件。真实时间采样和 `Simulation::Update(realDelta)` 只在 SimulationWorker 中发生；Start、Pause、Resume、Reset 命令都会重设工作线程的墙钟基准。
 - UI 从一份不可变快照读取电梯、楼层、Hall Call 和统计。电梯列表显示 E1~EN、真实楼层、方向、动作状态和载客量；楼层列表按高层到低层显示上下行等待；Hall Call 列表显示等待人数和归属；统计区显示模型时间、生成/等待/乘梯/到达人数及平均等待、平均乘梯、最大等待。

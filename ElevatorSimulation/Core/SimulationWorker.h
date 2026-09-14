@@ -32,6 +32,7 @@ public:
     void Resume();
     void Reset();
     void AddPassengers(int startFloor, int upCount, int downCount);
+    void SetSimulationSpeed(double speed);
     void ObserveHallCall(int floor, Direction direction);
     void ClearObservedHallCall();
     void Stop();
@@ -43,7 +44,7 @@ private:
     enum class CommandType
     {
         Start, Pause, Resume, Reset, AddPassengers,
-        ObserveHallCall, ClearObservedHallCall, Stop
+        ObserveHallCall, ClearObservedHallCall, Stop, SetSimulationSpeed
     };
     struct Command
     {
@@ -52,6 +53,7 @@ private:
         Direction direction = Direction::Idle;
         int upCount = 0;
         int downCount = 0;
+        double speed = 1.0;
     };
 
     SimulationConfig m_config;

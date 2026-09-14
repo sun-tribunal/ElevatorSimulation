@@ -243,6 +243,14 @@ void Simulation::Reset()
         Initialize(m_config, m_seed); // 保持本轮 seed，重置后可复现；失败保留旧状态。
 }
 
+bool Simulation::SetSimulationSpeed(double speed) noexcept
+{
+    if (!IsPositiveFinite(speed))
+        return false;
+    m_config.simulationSpeed = speed;
+    return true;
+}
+
 void Simulation::Update(double deltaTime)
 {
     if (!IsRunning() || !IsPositiveFinite(deltaTime))
