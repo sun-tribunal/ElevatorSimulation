@@ -31,6 +31,8 @@ public:
     void Pause();
     void Resume();
     void Reset();
+    void AddPassengers(int startFloor, int upCount, int downCount);
+    void SetSimulationSpeed(double speed);
     void ObserveHallCall(int floor, Direction direction);
     void ClearObservedHallCall();
     void Stop();
@@ -39,12 +41,19 @@ public:
     std::shared_ptr<const DispatchObservationSnapshot> GetLatestObservation() const;
 
 private:
-    enum class CommandType { Start, Pause, Resume, Reset, ObserveHallCall, ClearObservedHallCall, Stop };
+    enum class CommandType
+    {
+        Start, Pause, Resume, Reset, AddPassengers,
+        ObserveHallCall, ClearObservedHallCall, Stop, SetSimulationSpeed
+    };
     struct Command
     {
         CommandType type = CommandType::Start;
         int floor = 1;
         Direction direction = Direction::Idle;
+        int upCount = 0;
+        int downCount = 0;
+        double speed = 1.0;
     };
 
     SimulationConfig m_config;

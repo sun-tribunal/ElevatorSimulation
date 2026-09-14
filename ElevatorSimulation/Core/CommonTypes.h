@@ -127,28 +127,20 @@ struct ElevatorDispatchSnapshot
     struct StopService
     {
         int floor = 1;
-        // Idle 表示内呼/下客事件（0 人也保留停站）；Up/Down 表示对应外呼。
+        // Idle 表示已知内呼；Up/Down 表示对应外呼。只公开按钮，不公开人数。
         Direction direction = Direction::Idle;
-        // 包含 Alighting 中当前一人；Boarding 预留者的未来下客也已包含。
-        int alightingCount = 0;
-        // 不含正在 Boarding 的队头，避免与 reservedBoardingCount 重复。
-        int boardingCount = 0;
-        // 已知 FIFO 目标层前缀，最多需要 capacity 人；空列表兼容旧人数快照。
-        std::vector<int> boardingTargetFloors{};
     };
-    // Simulation 补充已分配外呼的真实队列与目标层；Dispatcher 只消费局部副本。
+    // 不包含等待乘客或正在 Boarding 的乘客目的层，也不包含精确上下客人数。
     std::vector<StopService> stopServices;
 };
 
-// 调度专用请求副本；不拥有乘客，只包含 FIFO 目标楼层数值。
+// 调度专用按钮请求；队头 ID 仅用于稳定排序，不提供乘客信息查询入口。
 struct HallCallDispatchSnapshot
 {
     int floor = 1;
     Direction direction = Direction::Idle;
     double firstRequestTime = 0.0;
     PassengerId firstPassengerId = InvalidPassengerId;
-    int waitingCount = 0;
-    std::vector<int> targetFloors;
 };
 
 struct DispatchScore

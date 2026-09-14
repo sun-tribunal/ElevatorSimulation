@@ -214,6 +214,26 @@ int main()
                 "coverage preserves one-based floor order");
     });
 
+    tests.Run("Coverage shares observable capacity and fixed hall service estimates", [&] {
+        auto config=Config(); config.capacity=1;
+        auto car=IdleCar(0,10,config);
+        car.elevator.state=ElevatorState::MovingDown; car.elevator.direction=Direction::Down;
+        car.elevator.passengerCount=1;
+        car.downTasks={5}; car.stopServices={{5,Direction::Down}};
+        ElevatorDispatcher dispatcher;
+        auto coverage=FleetRebalancer::BuildCoverageSnapshots({car},20,TrafficPattern::UpPeak,0,dispatcher);
+        tests.Check(!std::isfinite(CoverageAt(coverage,1).coverageEta),"full with no car call remains uncovered");
+        car.stopServices={{5,Direction::Idle}};
+        const auto score=dispatcher.ScoreSnapshot(1,Direction::Up,car,0,0);
+        coverage=FleetRebalancer::BuildCoverageSnapshots({car},20,TrafficPattern::UpPeak,0,dispatcher);
+        tests.Check(score.feasible && score.projectedOccupancy==0,"known car call releases one seat");
+        tests.Near(CoverageAt(coverage,1).coverageEta,score.eta,"coverage uses exact same new ScoreSnapshot result");
+        car.downTasks.push_back(3); car.stopServices.push_back({3,Direction::Down});
+        coverage=FleetRebalancer::BuildCoverageSnapshots({car},20,TrafficPattern::UpPeak,0,dispatcher);
+        tests.Check(!dispatcher.ScoreSnapshot(1,Direction::Up,car).feasible &&
+            !std::isfinite(CoverageAt(coverage,1).coverageEta),"estimated hall pickup consumes the released seat in both paths");
+    });
+
     tests.Run("Busy and repositioning elevators participate in Coverage", [&]
     {
         const auto config = Config();

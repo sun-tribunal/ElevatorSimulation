@@ -6,22 +6,58 @@
 #include <afxcmn.h>
 #include <afxwin.h>
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cwchar>
 
-class DashboardStatTitle : public CStatic
+class DashboardKpiBar : public CStatic
 {
+public:
+    BOOL Create(CWnd* parent, UINT controlId)
+    {
+        return CStatic::Create(L"", WS_CHILD | WS_VISIBLE | SS_NOTIFY,
+            CRect(), parent, controlId);
+    }
+
+    void SetFonts(CFont* titleFont, CFont* valueFont)
+    {
+        m_titleFont = titleFont;
+        m_valueFont = valueFont;
+        if (GetSafeHwnd() != nullptr) Invalidate(FALSE);
+    }
+
+    void SetValues(const std::array<CString, 6>& values)
+    {
+        if (m_values == values) return;
+        m_values = values;
+        if (GetSafeHwnd() != nullptr) Invalidate(FALSE);
+    }
+
 protected:
     LRESULT WindowProc(UINT message, WPARAM wParam, LPARAM lParam) override
     {
         if (message == WM_ERASEBKGND) return TRUE;
-        if (message != WM_PAINT)
-            return CStatic::WindowProc(message, wParam, lParam);
+        if (message == WM_PAINT)
+        {
+            PaintBar();
+            return 0;
+        }
+        return CStatic::WindowProc(message, wParam, lParam);
+    }
 
+private:
+    std::array<CString, 6> m_values{
+        L"0", L"0", L"0", L"0", L"0.00 秒", L"0.00 秒"
+    };
+    CFont* m_titleFont = nullptr;
+    CFont* m_valueFont = nullptr;
+
+    void PaintBar()
+    {
         CPaintDC paintDc(this);
         CRect client;
         GetClientRect(&client);
-        if (client.IsRectEmpty()) return 0;
+        if (client.IsRectEmpty()) return;
 
         CDC dc;
         dc.CreateCompatibleDC(&paintDc);
@@ -30,23 +66,55 @@ protected:
         CBitmap* oldBitmap = dc.SelectObject(&bitmap);
 
         dc.FillSolidRect(client, ::GetSysColor(COLOR_3DFACE));
-        dc.SetBkMode(TRANSPARENT);
-        if (GetFont() != nullptr) dc.SelectObject(GetFont());
+        CRect panel(client);
+        panel.right -= 1;
+        panel.bottom -= 1;
+        dc.FillSolidRect(panel, RGB(250, 252, 255));
+        dc.Draw3dRect(panel, RGB(207, 218, 231), RGB(207, 218, 231));
 
-        static const wchar_t* Chinese[] = {
+        static constexpr COLORREF Accents[] = {
+            RGB(37, 99, 235), RGB(217, 119, 6), RGB(124, 58, 237),
+            RGB(5, 150, 105), RGB(8, 145, 178), RGB(220, 38, 38)
+        };
+        static constexpr const wchar_t* Titles[] = {
             L"总生成", L"等待中", L"乘梯中", L"已到达", L"平均等待", L"最大等待"
         };
-        const int index = GetDlgCtrlID() - IDC_STAT_TITLE_FIRST;
-        if (index >= 0 && index < 6)
+
+        const int count = static_cast<int>(m_values.size());
+        const int columnWidth = panel.Width() / count;
+        const int titleBandBottom = (std::min)(panel.bottom - 32,
+            panel.top + (std::max)(34, panel.Height() * 42 / 100));
+        dc.FillSolidRect(panel.left + 1, panel.top + 4,
+            panel.Width() - 2, titleBandBottom - panel.top - 4, RGB(244, 248, 252));
+        dc.SetBkMode(TRANSPARENT);
+
+        for (int index = 0; index < count; ++index)
         {
-            dc.SetTextColor(RGB(45, 52, 62));
-            dc.DrawTextW(Chinese[index], client,
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            const int left = panel.left + index * columnWidth;
+            const int right = index + 1 == count ? panel.right : left + columnWidth;
+            dc.FillSolidRect(left + 1, panel.top + 1,
+                (std::max)(0, right - left - 1), 4, Accents[index]);
+            if (index > 0)
+                dc.FillSolidRect(left, panel.top + 11, 1,
+                    (std::max)(0, panel.Height() - 22), RGB(221, 228, 236));
+
+            CRect titleRect(left + 12, panel.top + 7, right - 10, titleBandBottom);
+            CFont* oldFont = nullptr;
+            if (m_titleFont != nullptr) oldFont = dc.SelectObject(m_titleFont);
+            dc.SetTextColor(RGB(51, 65, 85));
+            dc.DrawTextW(Titles[index], titleRect,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            CRect valueRect(left + 12, titleBandBottom + 2, right - 10, panel.bottom - 5);
+            if (m_valueFont != nullptr) dc.SelectObject(m_valueFont);
+            dc.SetTextColor(RGB(25, 39, 58));
+            dc.DrawTextW(m_values[index], valueRect,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            if (oldFont != nullptr) dc.SelectObject(oldFont);
         }
 
         paintDc.BitBlt(0, 0, client.Width(), client.Height(), &dc, 0, 0, SRCCOPY);
         dc.SelectObject(oldBitmap);
-        return 0;
     }
 };
 
@@ -170,37 +238,91 @@ protected:
             ElevatorStatusPalette::IdleFill
         };
         constexpr int ItemCount = static_cast<int>(_countof(Labels));
-        const int markerSize = (std::max)(8, (std::min)(11, client.Height() / 3));
-        const int markerTextGap = 4;
-        int itemGap = 10;
+        constexpr int MarkerTextGap = 4;
+        const int singleRowMarkerSize = (std::max)(8, (std::min)(11, client.Height() / 3));
         int itemWidths[ItemCount]{};
-        int totalWidth = 0;
         for (int index = 0; index < ItemCount; ++index)
         {
-            itemWidths[index] = markerSize + markerTextGap + dc.GetTextExtent(Labels[index]).cx;
-            totalWidth += itemWidths[index];
-        }
-        totalWidth += itemGap * (ItemCount - 1);
-        if (totalWidth > client.Width())
-        {
-            itemGap = 4;
-            totalWidth = itemGap * (ItemCount - 1);
-            for (int width : itemWidths) totalWidth += width;
+            itemWidths[index] = singleRowMarkerSize + MarkerTextGap +
+                dc.GetTextExtent(Labels[index]).cx;
         }
 
-        int x = client.left + (std::max)(0, (client.Width() - totalWidth) / 2);
-        const int markerTop = client.top + (client.Height() - markerSize) / 2;
-        for (int index = 0; index < ItemCount; ++index)
+        auto rowWidth = [&itemWidths](int begin, int end, int itemGap)
         {
+            int width = itemGap * (end - begin - 1);
+            for (int index = begin; index < end; ++index) width += itemWidths[index];
+            return width;
+        };
+        auto drawRow = [&](int begin, int end, const CRect& row, int itemGap)
+        {
+            const int markerSize = (std::max)(7,
+                (std::min)(singleRowMarkerSize, row.Height() - 4));
+            const int totalWidth = rowWidth(begin, end, itemGap);
+            int x = row.left + (std::max)(0, (row.Width() - totalWidth) / 2);
+            const int markerTop = row.top + (row.Height() - markerSize) / 2;
+            for (int index = begin; index < end; ++index)
+            {
+                CRect marker(x, markerTop, x + markerSize, markerTop + markerSize);
+                dc.FillSolidRect(marker, Colors[index]);
+                dc.Draw3dRect(marker, Colors[index], Colors[index]);
+                x += markerSize + MarkerTextGap;
+                const int textWidth = itemWidths[index] - singleRowMarkerSize - MarkerTextGap;
+                CRect labelRect(x, row.top, x + textWidth, row.bottom);
+                dc.DrawTextW(Labels[index], labelRect,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                x += textWidth + itemGap;
+            }
+        };
+        auto drawCell = [&](int index, const CRect& cell)
+        {
+            const int markerSize = (std::max)(7,
+                (std::min)(singleRowMarkerSize, cell.Height() - 4));
+            const int textWidth = dc.GetTextExtent(Labels[index]).cx;
+            const int totalWidth = markerSize + MarkerTextGap + textWidth;
+            int x = cell.left + (std::max)(0, (cell.Width() - totalWidth) / 2);
+            const int markerTop = cell.top + (cell.Height() - markerSize) / 2;
             CRect marker(x, markerTop, x + markerSize, markerTop + markerSize);
             dc.FillSolidRect(marker, Colors[index]);
             dc.Draw3dRect(marker, Colors[index], Colors[index]);
-            x += markerSize + markerTextGap;
-            CRect labelRect(x, client.top, x + itemWidths[index] - markerSize - markerTextGap,
-                client.bottom);
+            x += markerSize + MarkerTextGap;
+            CRect labelRect(x, cell.top, x + textWidth, cell.bottom);
             dc.DrawTextW(Labels[index], labelRect,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            x += labelRect.Width() + itemGap;
+        };
+
+        const bool needsTwoRows = client.Width() < 300 ||
+            rowWidth(0, ItemCount, 4) > client.Width();
+        if (needsTwoRows)
+        {
+            CRect firstRow = client;
+            firstRow.bottom = client.top + client.Height() / 2;
+            CRect secondRow = client;
+            secondRow.top = firstRow.bottom;
+            const int firstCellWidth = firstRow.Width() / 3;
+            for (int index = 0; index < 3; ++index)
+            {
+                CRect cell(firstRow.left + index * firstCellWidth, firstRow.top,
+                    index == 2 ? firstRow.right : firstRow.left + (index + 1) * firstCellWidth,
+                    firstRow.bottom);
+                drawCell(index, cell);
+            }
+            const int secondCellWidth = secondRow.Width() / 2;
+            for (int index = 3; index < ItemCount; ++index)
+            {
+                const int column = index - 3;
+                CRect cell(secondRow.left + column * secondCellWidth, secondRow.top,
+                    index + 1 == ItemCount ? secondRow.right :
+                    secondRow.left + (column + 1) * secondCellWidth, secondRow.bottom);
+                drawCell(index, cell);
+            }
+        }
+        else if (rowWidth(0, ItemCount, 10) <= client.Width())
+        {
+            drawRow(0, ItemCount, client, 10);
+        }
+        else
+        {
+            drawRow(0, ItemCount, client, 4);
         }
 
         paintDc.BitBlt(0, 0, client.Width(), client.Height(), &dc, 0, 0, SRCCOPY);

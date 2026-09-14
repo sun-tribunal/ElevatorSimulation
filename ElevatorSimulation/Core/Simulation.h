@@ -29,6 +29,10 @@ public:
     void Resume(); // 仅 Paused -> Running。
     void Reset(); // 以最近一次有效参数重新初始化；未初始化时无操作。
 
+    // 运行时修改仿真倍速：只影响后续 Update 的时间缩放，不重置时钟或重建状态。
+    // 合法值必须为有限正数；非法值返回 false 且保持原倍速不变。
+    bool SetSimulationSpeed(double speed) noexcept;
+
     // deltaTime 是真实经过的秒数，内部只乘一次 simulationSpeed。
     // 以事件边界推进整个群组，所有核心事件仅使用仿真秒。
     void Update(double deltaTime);
@@ -55,6 +59,9 @@ public:
         bool includeFloorCoverage = true) const;
     // 手工注入便于测试/演示，生成时间为当前仿真时间；失败返回 -1。
     PassengerId AddPassenger(int startFloor, int targetFloor);
+    // 在指定楼层按方向批量注入乘客，目的层在该方向的有效楼层中均匀生成。
+    // 整批参数无效时不修改仿真；成功时所有乘客使用同一当前仿真时刻。
+    bool AddPassengersAtFloor(int startFloor, Direction direction, int count);
     // 只读一致性诊断：所有权、人数守恒、楼层/方向、外呼唯一归属。
     bool ValidateState() const;
 

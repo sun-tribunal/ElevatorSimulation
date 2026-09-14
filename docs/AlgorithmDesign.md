@@ -9,7 +9,7 @@
 | 方向集选 collective control | 按行进方向服务已有内部目标及同向外呼 | 容易解释，符合方向保持规则 | 单独使用不能完成多梯分配；作为单梯基础 |
 | SCAN / LOOK | 保持扫描方向，LOOK 到最后待处理位置才折返 | 不因新请求立即反向；避免无任务仍走到端点 | 这是借用课程中的扫描思想，不能直接把磁盘算法当成完整电梯控制器 |
 | nearest-car | 选择距离较近的可响应梯 | 简单，适合作为比较基线 | 单纯绝对距离忽略返程、停靠与负载；不作为最终选择器 |
-| ETA | 预演当前任务与已知 FIFO 乘客的接客时间 | 能表达反向绕行、上下客及容量变化 | 未来新增乘客及后续分配可能改变路线，不保证未来实际到达时间 |
+| ETA | 基于可观测内外呼和固定服务成本估计接客时间 | 能表达反向绕行、上下客及容量变化 | 未来新增乘客及后续分配可能改变路线，不保证未来实际到达时间 |
 | 代价式 Hall Call Assignment | 按 ETA、负载等因素对所有电梯评分 | 可解释、可拆分测试 | 不声称全局最优；避免大量无单位权重 |
 
 主要来源：
@@ -30,14 +30,14 @@
 
 比较键按以下顺序排列，前一项不同就不比较后一项：
 
-1. AdjustedCost（仿真秒），下式中的 ETA、预计负载、方向成本与有上限的 Aging 折扣。
+1. AdjustedCost（仿真秒），下式中的 ETA、估计负载、方向成本与有上限的 Aging 折扣。
 2. ETA（仿真秒），即可以开始服务该外呼的时间，包含当前动作剩余时间、中间服务、移动以及请求层必须先完成的下客；不包含该外呼自身的上梯 T。
 3. 当前整数楼层至请求楼层的绝对距离。
 4. 上下行任务集合的元素总数。
 5. 电梯 ID；完全相同的重复 ID 输入最终保持容器先后顺序。
 
 ```text
-ETA = 当前动作剩余时间 + 后续移动层数 × S + 后续实际上下客人数 × T
+ETA = 当前动作剩余时间 + 后续移动层数 × S + 未知外呼停站数 × T + 估计内呼下客数 × T
 LoadCost = T × 请求层完成下客后的 projectedOccupancy / capacity
 DirectionCost = 空闲或顺路时为 0，否则为 S + T
 AgingBonus = min(8.0, max(0, currentTime - firstRequestTime) × 0.05)
@@ -46,17 +46,27 @@ AdjustedCost = ETA + LoadCost + max(0, DirectionCost - AgingBonus)
 
 路线与 `Elevator::HasTasksAhead` / `ChooseActionAtFloor` 保持同样的规则：所有内呼、Up 外呼和 Down 外呼共同决定当前方向是否还有前方任务；内呼在抵达时停站，外呼只在服务方向一致时停站。方向前方只有反向外呼时，仍须走到那个折返点，不能提前反向。例如 5F↑、8F↓ 外呼和新请求 3F↑，必须先到 8F 再回 3F。层间运行先完成已开始路段，不能因新请求立刻回头。空闲梯按接第一个外呼时的方向开始。
 
-调度只使用快照副本。`StopService` 的 Idle 记录表示内呼/下客（0 人仍可表示内部停靠）；Up/Down 记录表示外呼及对应队列。Simulation 按已分配的 `(floor, direction)` 读取 Floor 的真实 FIFO 人数及 Passenger 的 `targetFloor`，写入 `boardingCount` 和 `boardingTargetFloors`。目标层只复制最多 capacity 人的前缀，因为一次服务不可能登梯更多乘客；Dispatcher 不访问 Passenger、Floor 或 Simulation。
+### 基于可观测状态的容量估计 + FIFO 实际服务
 
-容量从 `passengerCount + reservedBoardingCount` 开始。真正停站时先消费已知下客，逐人增加 T 并将这批计数清零；返程再经过该层不能重复释放席位或重复计时。随后按 `min(boardingCount, capacity - projectedOccupancy)` 取 FIFO 前缀上梯，逐人增加 T，并将这些人的目标层加入局部内呼与下客计数。新乘客可以产生同一楼层的新一批下客，清零不代表永久禁止再次服务该层。未登梯者仍留在真实 Floor 队列，归 Simulation 后续重分配，不在本次预演中重复登梯。
+Simulation 知道完整乘客状态；Dispatcher 只使用传统楼层上下行按钮群控可获得的信息。`HallCallDispatchSnapshot` 只含楼层、方向、首次请求时间和用于稳定排序的队头 ID，不含真实 waitingCount 或目标层。`HallCallSnapshot` / 观察页仍显示真实等待人数，但人数不进入评分或联合路线预测。
 
-Alighting 进行中时，当前一人仍包含在乘客数和该层下客计数里：先用 `remainingActionTime` 完成他，并从两个计数中各减一；同层其他人再各计完整 T。Boarding 进行中时，预留者已占据预测席位且其未来目标已由 Elevator 写入下客事件；Simulation 从队列人数及 FIFO 目标前缀中跳过这名队头乘客。旧 `SelectElevator` 入口也不将这名预留者再次估成一名等待者。
+`ElevatorDispatchSnapshot::StopService` 只公开楼层和方向：Idle 为已知 Car Call，Up/Down 为外呼。同层 Car Call 是一个按钮，不公开究竟有几个人下车。`Elevator::GetDispatchSnapshot` 不导出 pendingTarget；乘客完成 Boarded 后，目的层才成为可用于 ETA 的真实 Car Call。Simulation 构造调度快照时只同步动作剩余时间，不再从 Floor / Passenger 回填队列信息。
 
-所有计时来自当前 S/T。LoadCost 使用接客前的预计载荷，上限为一个 T；当前乘客已经在途中下梯时不会继续产生当前负载惩罚。Aging 保持原有连续斜率和 8 秒上限，仅抵消有限方向成本；Simulation 仍先处理队头等待时间最早的未分配外呼。不能承诺所有客流均优于最近梯，也不声称全局最优。
+估计规则如下，S/T 均为仿真秒：
 
-兼容性：原 `SelectElevator` 及 `SelectFromSnapshots` 签名不变，新增目标列表允许为空。只有人数的旧快照按容量计实际上客时间，但不凭空推测他们的下客楼层；有完整信息的 Simulation 使用目标层前缀。非法目标层、方向不匹配或目标数超过等待人数的快照被拒绝。
+- 初始估计载荷为 passengerCount + 当前 Boarding 的一席预留；当前未满载有接客能力。
+- 沿原 LOOK 消费每个不同 Car Call 一次；有估计载荷时最多下 1 人、计 T、释放一席，不使用精确目的层人数。
+- 每个未知外呼停站固定计一个 T；有剩余容量时最多上 1 人。没有未知乘客的目的层，因此不增加未来内呼或猜测扫描终点。估计满载时外呼仍保留固定停站成本，不增加人数。
+- 请求层先处理估计下客，再判断是否有空位；ETA 不含该请求自身的上客 T。当前满载且接客前无已知内呼则不可行；存在之前或请求层的内呼则可估计释放一席，但更早外呼可能占用这一席。
+- 当前 Alighting 的一人只计 remainingActionTime，释放一席并消费当前内呼，不再估计同层其他下客。当前 Boarding 的一人已由预留席位和 remainingActionTime 覆盖，不能再为当前外呼加一人或完整 T；其目的层仍未知。
 
-验证包含手算成本的上下阈值、真实 Elevator 动作推进对照、108 组混合任务路线、双向经过同层的事件消费，以及 Simulation 真实 FIFO/Boarding 端到端用例。
+LoadCost 使用接客前估计载荷，上限为一个 T；Aging 保持连续斜率和 8 秒上限，仅抵消有限方向成本。Joint Dispatch、Reassignment、DeferredCapacity、FleetRebalancer 与 Coverage 共用 ScoreSnapshot，不存在另一套 ETA 或容量规则。Deferred 仍为临时预筛结果，不丢请求、不改队头和 Aging；Boarded / Alighted、路线撤销/改派等现有事件触发重新估计。
+
+真实运行保留 Elevator 原状态机及 T 秒/人的 Boarding / Alighting。FIFO 只在实际到站时通过 Floor::Peek / RemoveFront 决定上客顺序。估计允许与真实耗时和可用容量不同，通过动态重评估和改派持续修正，不能承诺所有客流均优于最近梯或声称全局最优。
+
+接口迁移：SelectElevator / SelectFromSnapshots / ScoreSnapshot 签名不变；调度快照删除 boardingTargetFloors、HallCallDispatchSnapshot.targetFloors / waitingCount，以及 StopService 的 boardingCount / alightingCount。手工构造 StopService 只传楼层、方向；不再接受旧精确人数快照。
+
+回归覆盖：改变等待目的层或队列长度时 Score / ETA / assignment 完全一致；Boarding 目的层隐藏、Boarded 后可见；同样内呼集合和载荷但不同下客人数分布的评分相同；满载的有/无前方内呼、请求层下客、重复内呼不重复释放、先下后上再次满载、双向 LOOK 消费、当前动作计时、实际 FIFO，以及固定 seed / Sequential / Parallel / 大小 Update 确定性。108 组混合路线另检查估计服务时间与真实 LOOK 移动路程的界限。
 
 ### Sequential / Parallel 候选评分
 
@@ -68,7 +78,7 @@ Alighting 进行中时，当前一人仍包含在乘客数和该层下客计数�
 
 ### 带滞回的动态重分配
 
-`ScoreSnapshot` 提供可行性、ETA、Cost 和预计人数，供原选择器、改派和联合分配共用；没有新增第二套 ETA。`SelectReassignment` 先计算原梯评分，再在其他可行候选中按 ETA、Cost、距离、任务数、ID 选择最好者。原梯可行时要求 `CurrentETA - BestETA >= ReassignThresholdSeconds`；原梯预测到请求层无座位时允许立即寻找替代，绕过普通临近锁、冷却和收益阈值，其他梯仍须通过完整容量校验。没有可行替代时保留归属，等待后续事件。
+`ScoreSnapshot` 提供可行性、ETA、Cost 和估计载荷，供原选择器、改派和联合分配共用；没有新增第二套 ETA。`SelectReassignment` 先计算原梯评分，再在其他可行候选中按 ETA、Cost、距离、任务数、ID 选择最好者。原梯可行时要求 `CurrentETA - BestETA >= ReassignThresholdSeconds`；原梯预测到请求层无座位时允许立即寻找替代，绕过普通临近锁、冷却和收益阈值，其他梯仍须通过完整容量校验。没有可行替代时保留归属，等待后续事件。
 
 阈值统一在 Dispatcher.h：收益阈值 5 仿真秒、`ReassignLockDistanceFloors=1`、`ReassignCooldownSeconds=10`。请求层真正 Stopped/Boarding/Alighting 且非 betweenFloors 始终保护，不能抢走传送中的乘客。其余情况下只有可行原梯使用普通保护：冷却自实际改派开始；临近锁要求 betweenFloors、MovingUp 且请求层在上方，或 MovingDown 且请求层在下方，并且整数楼层距离 <=1。currentFloor 相同但已驶离、相邻却正在远离或尚未移动，都不构成“正在接近”。
 
@@ -86,13 +96,13 @@ Deferred 只是本次快照上的分类，不增加永久状态或 UI 公共字�
 
 Alighted、外呼释放等模型事件继续置 m_dispatchDirty；改派中的撤销/添加已经在当前 DispatchCalls 内完成，随后窗口预筛使用重建后的快照。容量释放或路线结构变化都会重新评估 Deferred；纯 UI 快照读取或无模型事件的帧边界不触发扫描，没有独立定时器或额外仿真时间事件。ETA 已能预见已知下客，因此请求可能在实际 Alighted 前就因路线顺序变化恢复 Active，不能故意等实际释放后再接单。
 
-每层递归先根据前面已经插入的任务重新评分全部 N 台梯，再保留最优 3 台；连同“暂不分配”分支，深度最多 3、叶组合最多 `(3+1)^3=64`，不是 N³。搜索只维护局部快照，给空闲梯插入第一项任务时记录与真实 AddHallCall 相同的起步方向和当前路段，后续请求不能重新选择该起步方向。同梯接多个请求时，已知上客和目标层均参与之后的 ETA/容量预测。
+每层递归先根据前面已经插入的任务重新评分全部 N 台梯，再保留最优 3 台；连同“暂不分配”分支，深度最多 3、叶组合最多 `(3+1)^3=64`，不是 N³。搜索只维护局部快照，给空闲梯插入第一项任务时记录与真实 AddHallCall 相同的起步方向和当前路段，后续请求不能重新选择该起步方向。同梯接多个请求时，每个外呼的一人服务估计参与之后的 ETA/容量预测，不增加未知目标层。
 
-叶组合重新计算所有已选请求在最终路线下的 ETA 和预计载荷，防止只累加“插入时成本”而漏掉后续任务对早先请求的影响。方向惩罚保留各请求插入前的上下文（包括 Aging），避免把原来空闲梯的首项任务事后重复惩罚；ETA 和 LoadCost 使用最终路线数值。
+叶组合重新计算所有已选请求在最终路线下的 ETA 和估计载荷，防止只累加“插入时成本”而漏掉后续任务对早先请求的影响。方向惩罚保留各请求插入前的上下文（包括 Aging），避免把原来空闲梯的首项任务事后重复惩罚；ETA 和 LoadCost 使用最终路线数值。
 
 先寻找可分配数量最多的可行方案，避免全不分配的零成本方案胜出；数量相同时按总 AdjustedCost、最大单请求 ETA、总 ETA、最老请求顺序中的电梯 ID 比较。没有足够容量时允许部分请求保持 -1。重复电梯 ID 则稳定保持输入顺序；未分配在 ID 比较中置于已分配之后。
 
-两请求反例：S=2、T=3、capacity=10，E1 在 5F、E2 在 1F 且均空闲，最老请求 4F↑→20F，随后 6F↑→20F。贪心先选 E1 响应 4F（2 秒），E1 已向下起步且存在后续服务，使 6F 请求选 E2（10 秒），总成本 12 秒。联合分配先让 E2 接 4F（6 秒）、E1 接 6F（2 秒），总成本 8 秒；不能据此推断任意客流更优。
+两请求反例：S=2、T=3、capacity=10，E1 在 5F、E2 在 1F 且均空闲，最老请求 4F↑，随后 6F↑（尚未上梯的目的层不参与评分）。贪心先选 E1 响应 4F（2 秒），E1 已向下起步且存在后续服务，使 6F 请求选 E2（10 秒），总成本 12 秒。联合分配先让 E2 接 4F（6 秒）、E1 接 6F（2 秒），总成本 8 秒；不能据此推断任意客流更优。
 
 ### 固定基线对照与性能
 
@@ -110,7 +120,7 @@ Alighted、外呼释放等模型事件继续置 m_dispatchDirty；改派中的�
 
 有限场景全部送达。高客流两版均生成 4815 人，旧/新分别送达 3381/3418，队列等待 1413/1383，仍在乘梯 21/14；已上梯均值及响应延迟总和的样本数量不同，不能直接视为全体等待改善。90 人场景存在退化，运行开销普遍增加。
 
-每批窗口预筛最多 P×N 次 ScoreSnapshot（P 为当前 pending 数，找到三个 Active 即停止扫描）；随后三请求搜索至多 21N 次前缀候选评分，加至多 192 次叶请求复评。单次 ETA 自身还随已有任务和可上客人数增长。DispatchPlan 的 evaluatedCombinations / scoreEvaluations 仅统计联合搜索，不包含预筛；60 台电梯回归确认单批组合仍不超过 64。一次事件可执行多个批次，64 不是整次事件的上限。每轮改派还需约 H×N 次评分（H 为已分配外呼数），成功改派后重建快照；多批分配期间不重复改派。历史初版约 4 秒跑完 600 仿真秒仅是本机结果，不是实时性能保证。
+每批窗口预筛最多 P×N 次 ScoreSnapshot（P 为当前 pending 数，找到三个 Active 即停止扫描）；随后三请求搜索至多 21N 次前缀候选评分，加至多 192 次叶请求复评。单次 ETA 自身随已知按钮任务数量增长，不随真实等待人数增长。DispatchPlan 的 evaluatedCombinations / scoreEvaluations 仅统计联合搜索，不包含预筛；60 台电梯回归确认单批组合仍不超过 64。一次事件可执行多个批次，64 不是整次事件的上限。每轮改派还需约 H×N 次评分（H 为已分配外呼数），成功改派后重建快照；多批分配期间不重复改派。历史初版约 4 秒跑完 600 仿真秒仅是本机结果，不是实时性能保证。
 
 当前并行评分的独立微基准使用 `Tests/RunDispatchPerformance.ps1 x64`、MSVC `/O2 /MD`、120 层混合 LOOK 任务、每种 N 运行 120 次选择。本机使用默认上限 8 个线程，结果如下；所有串并行选择序列一致：
 

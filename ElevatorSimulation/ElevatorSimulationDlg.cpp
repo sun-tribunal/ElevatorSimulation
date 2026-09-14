@@ -1,4 +1,4 @@
-﻿
+
 // ElevatorSimulationDlg.cpp: 实现文件
 //
 
@@ -44,9 +44,11 @@ namespace
 		L"总时长（秒）", L"随机种子", L"仿真倍速"
 	};
 
-	constexpr const wchar_t* StatisticTitles[] = {
-		L"总生成", L"等待中", L"乘梯中", L"已到达", L"平均等待", L"最大等待"
-	};
+	// 倍速滑块：位置区间映射到 [0.1x, 20.0x] 的线性刻度，滑块每格 0.1x。
+	constexpr int kSpeedSliderMin = 1;
+	constexpr int kSpeedSliderMax = 200;
+	constexpr double kSpeedSliderStep = 0.1;
+	constexpr int kSpeedSliderDefaultPos = 10; // 1.0x。
 
 	const wchar_t* DirectionText(Direction direction)
 	{
@@ -199,13 +201,14 @@ BEGIN_MESSAGE_MAP(CElevatorSimulationDlg, CDialogEx)
 	ON_BN_CLICKED(IDC_BUTTON_PAUSE, &CElevatorSimulationDlg::OnBnClickedPause)
 	ON_BN_CLICKED(IDC_BUTTON_RESUME, &CElevatorSimulationDlg::OnBnClickedResume)
 	ON_BN_CLICKED(IDC_BUTTON_RESET, &CElevatorSimulationDlg::OnBnClickedReset)
-	ON_BN_CLICKED(IDC_BUTTON_SPEED_1, &CElevatorSimulationDlg::OnBnClickedSpeed1)
-	ON_BN_CLICKED(IDC_BUTTON_SPEED_2, &CElevatorSimulationDlg::OnBnClickedSpeed2)
-	ON_BN_CLICKED(IDC_BUTTON_SPEED_5, &CElevatorSimulationDlg::OnBnClickedSpeed5)
-	ON_BN_CLICKED(IDC_BUTTON_SPEED_10, &CElevatorSimulationDlg::OnBnClickedSpeed10)
+	ON_BN_CLICKED(IDC_BUTTON_ADD_PASSENGERS,
+		&CElevatorSimulationDlg::OnBnClickedAddPassengers)
+	ON_WM_HSCROLL()
+	ON_EN_CHANGE(IDC_EDIT_MANUAL_FLOOR, &CElevatorSimulationDlg::OnEnChangeManualFloor)
 	ON_CBN_SELCHANGE(IDC_COMBO_TRAFFIC_SCENARIO,
 		&CElevatorSimulationDlg::OnCbnSelchangeTrafficScenario)
 	ON_BN_CLICKED(IDC_BUTTON_PANEL_TOGGLE, &CElevatorSimulationDlg::OnBnClickedPanelToggle)
+	ON_NOTIFY(TCN_SELCHANGE, IDC_TAB_LEFT, &CElevatorSimulationDlg::OnTcnSelchangeLeftTabs)
 	ON_NOTIFY(TCN_SELCHANGE, IDC_TAB_PAGES, &CElevatorSimulationDlg::OnTcnSelchangePages)
 	ON_NOTIFY(TCN_SELCHANGE, IDC_TAB_RIGHT, &CElevatorSimulationDlg::OnTcnSelchangeRightTabs)
 	ON_NOTIFY(NM_CLICK, IDC_LIST_HALL_CALLS, &CElevatorSimulationDlg::OnNMClickHallCallList)
@@ -248,7 +251,7 @@ BOOL CElevatorSimulationDlg::OnInitDialog()
 	SetWindowTextW(L"多电梯群控调度仿真系统");
 	ModifyStyle(0, WS_THICKFRAME | WS_MAXIMIZEBOX);
 	const UINT dpi = GetDpiForWindow(m_hWnd);
-	SetWindowPos(nullptr, 0, 0, MulDiv(1280, dpi, 96), MulDiv(780, dpi, 96),
+	SetWindowPos(nullptr, 0, 0, MulDiv(1440, dpi, 96), MulDiv(900, dpi, 96),
 		SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
 	CenterWindow();
 	for (CWnd* child = GetWindow(GW_CHILD); child != nullptr; child = child->GetNextWindow())
@@ -264,7 +267,11 @@ BOOL CElevatorSimulationDlg::OnInitDialog()
 	SetDlgItemTextW(IDC_EDIT_PASSENGER_RATE, L"0.2");
 	SetDlgItemTextW(IDC_EDIT_SPEED, L"1");
 	SetDlgItemTextW(IDC_EDIT_SEED, L"42");
+	m_manualFloorEdit.SetWindowTextW(L"1");
+	m_manualUpEdit.SetWindowTextW(L"1");
+	m_manualDownEdit.SetWindowTextW(L"0");
 	m_uiReady = true;
+	m_speedSlider.SetPos(kSpeedSliderDefaultPos);
 	UpdateSpeedDisplay(1.0);
 	UpdateTabPageVisibility();
 
@@ -285,24 +292,28 @@ BOOL CElevatorSimulationDlg::OnInitDialog()
 
 void CElevatorSimulationDlg::CreateUIFramework()
 {
-	LOGFONT baseFont{};
-	GetFont()->GetLogFont(&baseFont);
-	LOGFONT titleFont = baseFont;
-	titleFont.lfHeight = baseFont.lfHeight * 2;
-	titleFont.lfWeight = FW_BOLD;
-	m_titleFont.CreateFontIndirect(&titleFont);
-	LOGFONT sectionFont = baseFont;
-	sectionFont.lfHeight = baseFont.lfHeight * 3 / 2;
-	sectionFont.lfWeight = FW_BOLD;
-	m_sectionFont.CreateFontIndirect(&sectionFont);
-	LOGFONT pageTabFont = baseFont;
-	pageTabFont.lfHeight = baseFont.lfHeight * 5 / 4;
-	pageTabFont.lfWeight = FW_SEMIBOLD;
-	m_pageTabFont.CreateFontIndirect(&pageTabFont);
-	LOGFONT valueFont = baseFont;
-	valueFont.lfHeight = baseFont.lfHeight * 7 / 4;
-	valueFont.lfWeight = FW_SEMIBOLD;
-	m_statValueFont.CreateFontIndirect(&valueFont);
+	CRect client;
+	GetClientRect(&client);
+	const UINT dpi = GetDpiForWindow(m_hWnd);
+	const UINT widthLimitedDpi = static_cast<UINT>(
+		(std::max)(72, MulDiv(client.Width(), 96, 1240)));
+	const UINT heightLimitedDpi = static_cast<UINT>(
+		(std::max)(72, MulDiv(client.Height(), 96, 760)));
+	const UINT visualDpi = (std::min)({ dpi, widthLimitedDpi, heightLimitedDpi });
+	auto createFont = [visualDpi](CFont& font, int pointSize, LONG weight)
+	{
+		LOGFONT specification{};
+		specification.lfHeight = -MulDiv(pointSize, visualDpi, 72);
+		specification.lfWeight = weight;
+		specification.lfQuality = CLEARTYPE_QUALITY;
+		wcscpy_s(specification.lfFaceName, L"Microsoft YaHei UI");
+		font.CreateFontIndirect(&specification);
+	};
+	createFont(m_bodyFont, 10, FW_NORMAL);
+	createFont(m_titleFont, 18, FW_BOLD);
+	createFont(m_sectionFont, 11, FW_SEMIBOLD);
+	createFont(m_pageTabFont, 10, FW_SEMIBOLD);
+	createFont(m_statValueFont, 11, FW_SEMIBOLD);
 
 	const DWORD labelStyle = WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE;
 	m_headerTitle.Create(L"多电梯群控调度仿真系统", labelStyle, CRect(), this, IDC_HEADER_TITLE);
@@ -314,21 +325,53 @@ void CElevatorSimulationDlg::CreateUIFramework()
 	m_headerTraffic.Create(L"场景：固定模式 · 当前模式：均匀随机",
 		labelStyle, CRect(), this, IDC_HEADER_TRAFFIC);
 
-	m_leftPanel.Create(L"参数与控制", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+	m_leftPanel.Create(L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_GROUPBOX,
 		CRect(), this, IDC_PANEL_LEFT);
+	m_leftTabs.Create(WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS |
+		TCS_TABS | TCS_SINGLELINE,
+		CRect(), this, IDC_TAB_LEFT);
+	m_leftTabs.InsertItem(0, L"仿真配置");
+	m_leftTabs.InsertItem(1, L"手动客流");
+	m_leftTabs.SetCurSel(0);
 	m_mainPanel.Create(L"实时电梯群控主视图", WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
 		CRect(), this, IDC_PANEL_MAIN);
-	m_rightPanel.Create(L"信息侧栏", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_GROUPBOX,
+	m_rightPanel.Create(L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_GROUPBOX,
 		CRect(), this, IDC_PANEL_RIGHT);
 	m_panelToggle.Create(L"<<", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
 		CRect(), this, IDC_BUTTON_PANEL_TOGGLE);
 	m_buildingView.Create(&m_mainPanel, IDC_BUILDING_VIEW);
 	m_buildingView.SetFont(GetFont());
 
-	m_parameterSection.Create(L"参数输入", labelStyle, CRect(), this, IDC_SECTION_PARAMETERS);
+	m_parameterSection.Create(L"基础参数", labelStyle, CRect(), this, IDC_SECTION_PARAMETERS);
+	m_manualSection.Create(L"手动添加乘客", labelStyle, CRect(), this, IDC_MANUAL_SECTION);
+	m_manualDescription.Create(
+		L"指定出发楼层及上下行人数；目的楼层由模型在对应方向内生成。",
+		WS_CHILD | SS_LEFT, CRect(), this, IDC_MANUAL_DESCRIPTION);
+	constexpr const wchar_t* ManualLabels[] = { L"出发楼层", L"上行人数", L"下行人数" };
+	constexpr UINT ManualLabelIds[] = {
+		IDC_MANUAL_LABEL_FLOOR, IDC_MANUAL_LABEL_UP, IDC_MANUAL_LABEL_DOWN
+	};
+	for (std::size_t index = 0; index < m_manualLabels.size(); ++index)
+	{
+		m_manualLabels[index].Create(ManualLabels[index], labelStyle, CRect(), this,
+			ManualLabelIds[index]);
+	}
+	const DWORD editStyle = WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL;
+	m_manualFloorEdit.CreateEx(WS_EX_CLIENTEDGE, L"EDIT", L"", editStyle,
+		CRect(), this, IDC_EDIT_MANUAL_FLOOR);
+	m_manualUpEdit.CreateEx(WS_EX_CLIENTEDGE, L"EDIT", L"", editStyle,
+		CRect(), this, IDC_EDIT_MANUAL_UP);
+	m_manualDownEdit.CreateEx(WS_EX_CLIENTEDGE, L"EDIT", L"", editStyle,
+		CRect(), this, IDC_EDIT_MANUAL_DOWN);
+	m_addPassengersButton.Create(L"添加到当前仿真",
+		WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON, CRect(), this,
+		IDC_BUTTON_ADD_PASSENGERS);
+	m_manualFeedback.Create(L"运行或暂停时可添加；提交后立即进入当前模型时刻。",
+		WS_CHILD | SS_LEFT | SS_CENTERIMAGE, CRect(), this, IDC_MANUAL_FEEDBACK);
 	m_controlSection.Create(L"仿真控制", labelStyle, CRect(), this, IDC_SECTION_CONTROLS);
 	m_speedSection.Create(L"快捷倍速", labelStyle, CRect(), this, IDC_SECTION_SPEED);
 	m_parameterSection.SetFont(&m_sectionFont);
+	m_manualSection.SetFont(&m_sectionFont);
 	m_controlSection.SetFont(&m_sectionFont);
 	m_speedSection.SetFont(&m_sectionFont);
 	m_trafficScenarioCombo.Create(WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL |
@@ -352,15 +395,15 @@ void CElevatorSimulationDlg::CreateUIFramework()
 			ParameterLabelIds[index]);
 	}
 
-	constexpr const wchar_t* SpeedLabels[] = { L"1 倍", L"2 倍", L"5 倍", L"10 倍" };
-	for (std::size_t index = 0; index < m_speedButtons.size(); ++index)
-	{
-		m_speedButtons[index].Create(SpeedLabels[index],
-			WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, CRect(), this,
-			IDC_BUTTON_SPEED_1 + static_cast<UINT>(index));
-	}
+	m_speedSlider.Create(WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_AUTOTICKS,
+		CRect(), this, IDC_SLIDER_SPEED);
+	m_speedSlider.SetRange(kSpeedSliderMin, kSpeedSliderMax, TRUE);
+	m_speedSlider.SetTicFreq(10);
+	m_speedSlider.SetPageSize(10);
+	m_speedSlider.SetLineSize(1);
 
-	m_rightTabs.Create(WS_CHILD | TCS_TABS | TCS_SINGLELINE,
+	m_rightTabs.Create(WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS |
+		TCS_TABS | TCS_SINGLELINE,
 		CRect(), this, IDC_TAB_RIGHT);
 	m_rightTabs.InsertItem(0, L"外呼请求");
 	m_rightTabs.InsertItem(1, L"电梯详情");
@@ -407,18 +450,23 @@ void CElevatorSimulationDlg::CreateUIFramework()
 	m_floorCoverageView.Create(this, IDC_FLOOR_COVERAGE_VIEW);
 	m_floorCoverageView.SetFont(GetFont());
 
-	for (std::size_t index = 0; index < m_statCards.size(); ++index)
-	{
-		m_statCards[index].Create(L"", WS_CHILD | WS_VISIBLE | WS_BORDER,
-			CRect(), this, IDC_STAT_CARD_FIRST + static_cast<UINT>(index));
-		m_statTitles[index].Create(StatisticTitles[index],
-			WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE, CRect(), this,
-			IDC_STAT_TITLE_FIRST + static_cast<UINT>(index));
-		m_statValues[index].Create(index >= 4 ? L"0.00 秒" : L"0",
-			WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE, CRect(), this,
-			IDC_STAT_VALUE_FIRST + static_cast<UINT>(index));
-		m_statValues[index].SetFont(&m_statValueFont);
-	}
+	m_kpiBar.Create(this, IDC_STAT_CARD_FIRST);
+	m_kpiBar.SetFonts(&m_pageTabFont, &m_statValueFont);
+
+	for (CWnd* child = GetWindow(GW_CHILD); child != nullptr; child = child->GetNextWindow())
+		child->SetFont(&m_bodyFont);
+	m_headerTitle.SetFont(&m_titleFont);
+	m_parameterSection.SetFont(&m_sectionFont);
+	m_manualSection.SetFont(&m_sectionFont);
+	m_controlSection.SetFont(&m_sectionFont);
+	m_speedSection.SetFont(&m_sectionFont);
+	m_rightHallCallTitle.SetFont(&m_sectionFont);
+	m_elevatorDetailTitle.SetFont(&m_sectionFont);
+	m_rightAlgorithmTitle.SetFont(&m_sectionFont);
+	m_pageTabs.SetFont(&m_pageTabFont);
+	m_leftTabs.SetFont(&m_pageTabFont);
+	m_rightTabs.SetFont(&m_pageTabFont);
+	m_kpiBar.SetFonts(&m_pageTabFont, &m_statValueFont);
 
 	for (int controlId : ParameterControlIds)
 		GetDlgItem(controlId)->ShowWindow(SW_SHOW);
@@ -430,6 +478,7 @@ void CElevatorSimulationDlg::CreateUIFramework()
 	}
 	m_elevatorList.ShowWindow(SW_HIDE);
 	m_floorList.ShowWindow(SW_HIDE);
+	UpdateLeftPanelVisibility();
 }
 
 void CElevatorSimulationDlg::RelayoutUI()
@@ -439,126 +488,155 @@ void CElevatorSimulationDlg::RelayoutUI()
 	CRect client;
 	GetClientRect(&client);
 	const UINT dpi = GetDpiForWindow(m_hWnd);
-	auto toDevice = [dpi](int value) { return MulDiv(value, dpi, 96); };
-	const int clientWidth = MulDiv(client.Width(), 96, dpi);
-	const int clientHeight = MulDiv(client.Height(), 96, dpi);
-	const int margin = 12;
-	const int gap = 8;
-	const int headerHeight = 66;
-	const int leftWidth = 220;
-	const int tabsHeight = 42;
-	const int statsHeight = 94;
+	const UINT widthLimitedDpi = static_cast<UINT>(
+		(std::max)(72, MulDiv(client.Width(), 96, 1240)));
+	const UINT heightLimitedDpi = static_cast<UINT>(
+		(std::max)(72, MulDiv(client.Height(), 96, 760)));
+	const UINT layoutDpi = (std::min)({ dpi, widthLimitedDpi, heightLimitedDpi });
+	auto toDevice = [layoutDpi](int value) { return MulDiv(value, layoutDpi, 96); };
+	const int clientWidth = MulDiv(client.Width(), 96, layoutDpi);
+	const int clientHeight = MulDiv(client.Height(), 96, layoutDpi);
+	const int margin = 16;
+	const int gap = 10;
+	const int headerHeight = 64;
+	const int leftWidth = 260;
+	const int tabsHeight = 38;
+	const int statsHeight = 84;
 	const int contentTop = headerHeight + gap;
-	const int contentBottom = clientHeight - margin;
-	const int mainBottom = contentBottom - tabsHeight - statsHeight - gap * 2;
+	const int contentBottom = clientHeight - 16;
 	const int centerX = margin + leftWidth + gap;
 	const bool realTimePage = m_pageTabs.GetCurSel() == 0;
-	const int rightWidth = m_rightPanelExpanded ? 310 : 46;
+	const int rightWidth = m_rightPanelExpanded ? 350 : 48;
 	const int rightX = clientWidth - margin - rightWidth;
 	const int centerRight = realTimePage ? rightX - gap : clientWidth - margin;
 	const int centerWidth = centerRight - centerX;
-	const int mainHeight = mainBottom - contentTop;
+	const int navigationY = contentTop;
+	const int mainTop = navigationY + tabsHeight + gap;
+	const int statsY = contentBottom - statsHeight;
+	const int mainBottom = statsY - gap;
+	const int mainHeight = mainBottom - mainTop;
 	auto place = [&toDevice](CWnd& control, int x, int y, int width, int height)
 	{
-		control.MoveWindow(toDevice(x), toDevice(y), toDevice(width), toDevice(height), TRUE);
+		control.MoveWindow(toDevice(x), toDevice(y), toDevice(width), toDevice(height), FALSE);
 	};
 	auto move = [this, &toDevice](int controlId, int x, int y, int width, int height)
 	{
 		GetDlgItem(controlId)->MoveWindow(toDevice(x), toDevice(y),
-			toDevice(width), toDevice(height), TRUE);
+			toDevice(width), toDevice(height), FALSE);
 	};
-	m_pageTabs.SetPadding(CSize(toDevice(18), toDevice(8)));
+	m_pageTabs.SetPadding(CSize(toDevice(centerWidth < 720 ? 12 : 20), toDevice(7)));
+	m_leftTabs.SetPadding(CSize(toDevice(14), toDevice(6)));
+	m_rightTabs.SetPadding(CSize(toDevice(12), toDevice(6)));
 
-	place(m_headerTitle, margin + 4, 8, 350, 40);
-	const int headerInfoX = (std::max)(380, centerX);
+	place(m_headerTitle, margin + 2, 7, 360, 42);
+	const int headerInfoX = (std::max)(390, centerX);
 	const int headerInfoWidth = clientWidth - margin - headerInfoX;
 	const int headerPart = headerInfoWidth / 3;
-	place(m_headerStateLabel, headerInfoX, 5, 76, 28);
-	move(IDC_SIMULATION_STATE, headerInfoX + 76, 5, headerPart - 76, 28);
-	place(m_headerTimeLabel, headerInfoX + headerPart, 5, 76, 28);
-	move(IDC_MODEL_TIME, headerInfoX + headerPart + 76, 5, headerPart - 76, 28);
-	place(m_headerSpeedLabel, headerInfoX + headerPart * 2, 5, 76, 28);
-	place(m_headerSpeed, headerInfoX + headerPart * 2 + 76, 5,
-		headerInfoWidth - headerPart * 2 - 76, 28);
-	place(m_headerTraffic, headerInfoX, 34, headerInfoWidth, 24);
+	place(m_headerStateLabel, headerInfoX, 4, 80, 27);
+	move(IDC_SIMULATION_STATE, headerInfoX + 80, 4, headerPart - 80, 27);
+	place(m_headerTimeLabel, headerInfoX + headerPart, 4, 80, 27);
+	move(IDC_MODEL_TIME, headerInfoX + headerPart + 80, 4, headerPart - 80, 27);
+	place(m_headerSpeedLabel, headerInfoX + headerPart * 2, 4, 80, 27);
+	place(m_headerSpeed, headerInfoX + headerPart * 2 + 80, 4,
+		headerInfoWidth - headerPart * 2 - 80, 27);
+	place(m_headerTraffic, headerInfoX, 33, headerInfoWidth, 24);
 
-	place(m_leftPanel, margin, contentTop, leftWidth, contentBottom - contentTop);
+	const int sidePanelTop = contentTop + tabsHeight + gap;
+	const bool compactSidePanel = mainBottom - sidePanelTop < 600;
+	place(m_leftTabs, margin, contentTop, leftWidth, tabsHeight);
+	place(m_leftPanel, margin, sidePanelTop, leftWidth, mainBottom - sidePanelTop);
 	const int leftInnerX = margin + 14;
-	const int labelWidth = 110;
+	const int leftInnerWidth = leftWidth - 28;
+	const int panelContentTop = sidePanelTop + 20;
+	const int labelWidth = 116;
 	const int editX = leftInnerX + labelWidth;
-	const int editWidth = leftWidth - 28 - labelWidth;
-	place(m_parameterSection, leftInnerX, contentTop + 20, leftWidth - 28, 22);
-	const int firstRowY = contentTop + 46;
-	const int rowHeight = 29;
+	const int editWidth = leftInnerWidth - labelWidth;
+	place(m_parameterSection, leftInnerX, panelContentTop, leftInnerWidth, 24);
+	const int firstRowY = panelContentTop + (compactSidePanel ? 24 : 29);
+	const int rowHeight = compactSidePanel ? 23 : 29;
 	for (std::size_t index = 0; index < m_parameterLabels.size(); ++index)
 	{
 		const int rowY = firstRowY + static_cast<int>(index) * rowHeight;
-		place(m_parameterLabels[index], leftInnerX, rowY, labelWidth - 6, 22);
+		place(m_parameterLabels[index], leftInnerX, rowY, labelWidth - 8, 24);
 		const int controlId = ParameterControlIds[index];
 		move(controlId, editX, rowY, editWidth,
 			controlId == IDC_COMBO_TRAFFIC_SCENARIO ||
-			controlId == IDC_COMBO_TRAFFIC_PATTERN ? 120 : 22);
+			controlId == IDC_COMBO_TRAFFIC_PATTERN ? 140 : 24);
 	}
 
-	const int rebalanceY = firstRowY + static_cast<int>(m_parameterLabels.size()) * rowHeight + 5;
-	place(m_predictiveRebalancingCheck, leftInnerX, rebalanceY, leftWidth - 28, 24);
-	const int controlsY = rebalanceY + 30;
-	place(m_controlSection, leftInnerX, controlsY, leftWidth - 28, 22);
-	const int actionY = controlsY + 28;
-	const int actionWidth = (leftWidth - 36) / 2;
+	const int rebalanceY = firstRowY + static_cast<int>(m_parameterLabels.size()) * rowHeight + 4;
+	place(m_predictiveRebalancingCheck, leftInnerX, rebalanceY, leftInnerWidth, 24);
+
+	place(m_manualSection, leftInnerX, panelContentTop, leftInnerWidth, 24);
+	place(m_manualDescription, leftInnerX, panelContentTop + 31, leftInnerWidth,
+		compactSidePanel ? 42 : 50);
+	const int manualRowGap = compactSidePanel ? 34 : 38;
+	const int manualFirstRowY = panelContentTop + (compactSidePanel ? 83 : 94);
+	for (std::size_t index = 0; index < m_manualLabels.size(); ++index)
+	{
+		const int rowY = manualFirstRowY + static_cast<int>(index) * manualRowGap;
+		place(m_manualLabels[index], leftInnerX, rowY, labelWidth - 8, 28);
+	}
+	place(m_manualFloorEdit, editX, manualFirstRowY, editWidth, 28);
+	place(m_manualUpEdit, editX, manualFirstRowY + manualRowGap, editWidth, 28);
+	place(m_manualDownEdit, editX, manualFirstRowY + manualRowGap * 2, editWidth, 28);
+	const int manualButtonY = manualFirstRowY + manualRowGap * 3 +
+		(compactSidePanel ? 10 : 12);
+	place(m_addPassengersButton, leftInnerX, manualButtonY, leftInnerWidth,
+		compactSidePanel ? 36 : 38);
+	place(m_manualFeedback, leftInnerX,
+		manualButtonY + (compactSidePanel ? 44 : 48), leftInnerWidth,
+		compactSidePanel ? 42 : 56);
+
+	const int speedButtonY = mainBottom - 43;
+	const int speedY = speedButtonY - 28;
+	const int actionY = speedY - 91;
+	const int controlsY = actionY - 29;
+	place(m_controlSection, leftInnerX, controlsY, leftInnerWidth, 23);
+	const int actionWidth = (leftInnerWidth - 8) / 2;
 	move(IDC_BUTTON_START, leftInnerX, actionY, actionWidth, 34);
 	move(IDC_BUTTON_PAUSE, leftInnerX + actionWidth + 8, actionY, actionWidth, 34);
 	move(IDC_BUTTON_RESUME, leftInnerX, actionY + 42, actionWidth, 34);
 	move(IDC_BUTTON_RESET, leftInnerX + actionWidth + 8, actionY + 42, actionWidth, 34);
 
-	const int speedY = actionY + 88;
-	place(m_speedSection, leftInnerX, speedY, leftWidth - 28, 22);
-	const int speedButtonY = speedY + 27;
-	const int speedButtonWidth = (leftWidth - 52) / 4;
-	for (std::size_t index = 0; index < m_speedButtons.size(); ++index)
-	{
-		place(m_speedButtons[index], leftInnerX +
-			static_cast<int>(index) * (speedButtonWidth + 4), speedButtonY,
-			speedButtonWidth, 32);
-	}
+	place(m_speedSection, leftInnerX, speedY, leftInnerWidth, 22);
+	place(m_speedSlider, leftInnerX, speedButtonY, leftInnerWidth, 34);
+
+	const int legendPreferredWidth = 320;
+	const int pageTabsMinimumWidth = 260;
+	const int pageTabsWidth = (std::min)(360,
+		(std::max)(pageTabsMinimumWidth, centerWidth - gap - legendPreferredWidth));
+	place(m_pageTabs, centerX, navigationY, pageTabsWidth, tabsHeight);
+	place(m_elevatorStateLegend, centerX + pageTabsWidth + gap, navigationY,
+		(std::max)(0, centerWidth - pageTabsWidth - gap), tabsHeight);
 
 	if (realTimePage)
 	{
-		place(m_mainPanel, centerX, contentTop, centerWidth, mainHeight);
+		place(m_mainPanel, centerX, mainTop, centerWidth, mainHeight);
 		place(m_buildingView, 10, 22, centerWidth - 20, mainHeight - 32);
 
-		place(m_rightPanel, rightX, contentTop, rightWidth, contentBottom - contentTop);
-		place(m_panelToggle, rightX + rightWidth - 38, contentTop + 15, 30, 27);
+		place(m_rightPanel, rightX, sidePanelTop, rightWidth, mainBottom - sidePanelTop);
+		place(m_panelToggle, rightX + rightWidth - 43, contentTop + 5, 32, 28);
 		if (m_rightPanelExpanded)
 		{
 			const int innerX = rightX + 12;
 			const int innerWidth = rightWidth - 24;
-			const int innerTop = contentTop + 43;
-			const int innerBottom = contentBottom - 10;
-			const int availableHeight = innerBottom - innerTop;
-			const int sectionTitleHeight = 22;
-			const int sectionGap = 6;
-			const int hallListHeight = (std::clamp)(availableHeight * 20 / 100, 120, 150);
-			const int detailBodyHeight = availableHeight * 29 / 100;
-			const int observationSummaryHeight = 42;
-
-			int y = innerTop;
-			place(m_rightHallCallTitle, innerX + 2, y, innerWidth - 42, sectionTitleHeight);
-			y += sectionTitleHeight;
-			place(m_hallCallList, innerX, y, innerWidth, hallListHeight);
-			y += hallListHeight + sectionGap;
-
-			place(m_elevatorDetailTitle, innerX + 2, y, innerWidth - 4, sectionTitleHeight);
-			y += sectionTitleHeight;
-			place(m_elevatorDetailBody, innerX, y, innerWidth, detailBodyHeight);
-			y += detailBodyHeight + sectionGap;
-
-			place(m_rightAlgorithmTitle, innerX + 2, y, innerWidth - 4, sectionTitleHeight);
-			y += sectionTitleHeight;
-			place(m_algorithmPlaceholder, innerX, y, innerWidth, observationSummaryHeight);
-			y += observationSummaryHeight + 4;
-			place(m_algorithmCandidateList, innerX, y, innerWidth,
-				(std::max)(80, innerBottom - y));
+			place(m_rightTabs, rightX, contentTop, rightWidth - 48, tabsHeight);
+			const int innerTop = sidePanelTop + 17;
+			const int innerBottom = mainBottom - 10;
+			const int sectionTitleHeight = 26;
+			const int bodyTop = innerTop + sectionTitleHeight;
+			place(m_rightHallCallTitle, innerX + 2, innerTop,
+				innerWidth - 4, sectionTitleHeight);
+			place(m_hallCallList, innerX, bodyTop, innerWidth, innerBottom - bodyTop);
+			place(m_elevatorDetailTitle, innerX + 2, innerTop,
+				innerWidth - 4, sectionTitleHeight);
+			place(m_elevatorDetailBody, innerX, bodyTop, innerWidth, innerBottom - bodyTop);
+			place(m_rightAlgorithmTitle, innerX + 2, innerTop,
+				innerWidth - 4, sectionTitleHeight);
+			place(m_algorithmPlaceholder, innerX, bodyTop, innerWidth, 58);
+			place(m_algorithmCandidateList, innerX, bodyTop + 66, innerWidth,
+				(std::max)(100, innerBottom - bodyTop - 66));
 		}
 	}
 	else
@@ -567,19 +645,19 @@ void CElevatorSimulationDlg::RelayoutUI()
 		if (m_pageTabs.GetCurSel() == 1)
 		{
 			const int heatmapWidth = pageWidth * 38 / 100;
-			place(m_statisticsTrendView, centerX, contentTop,
+			place(m_statisticsTrendView, centerX, mainTop,
 				pageWidth - heatmapWidth - gap, mainHeight);
 			place(m_floorTrafficHeatmapView, centerX + pageWidth - heatmapWidth,
-				contentTop, heatmapWidth, mainHeight);
+				mainTop, heatmapWidth, mainHeight);
 		}
 		else
 		{
-			place(m_algorithmPageSummary, centerX, contentTop, pageWidth, 64);
+			place(m_algorithmPageSummary, centerX, mainTop, pageWidth, 64);
 			const int coverageWidth = pageWidth * 42 / 100;
-			place(m_algorithmCandidateList, centerX, contentTop + 72,
+			place(m_algorithmCandidateList, centerX, mainTop + 72,
 				pageWidth - coverageWidth - gap, mainHeight - 72);
 			place(m_floorCoverageView, centerX + pageWidth - coverageWidth,
-				contentTop + 72, coverageWidth, mainHeight - 72);
+				mainTop + 72, coverageWidth, mainHeight - 72);
 			if (m_algorithmCandidateList.GetHeaderCtrl() != nullptr)
 			{
 				const int listWidth = pageWidth - coverageWidth - gap;
@@ -593,21 +671,7 @@ void CElevatorSimulationDlg::RelayoutUI()
 		}
 	}
 
-	const int pageTabsWidth = (std::min)(320, centerWidth);
-	place(m_pageTabs, centerX, mainBottom + gap, pageTabsWidth, tabsHeight);
-	place(m_elevatorStateLegend, centerX + pageTabsWidth + gap, mainBottom + gap,
-		(std::max)(0, centerWidth - pageTabsWidth - gap), tabsHeight);
-	const int statsY = mainBottom + gap + tabsHeight + gap;
-	const int statGap = 6;
-	const int statWidth = (centerWidth - statGap * 5) / 6;
-	for (std::size_t index = 0; index < m_statCards.size(); ++index)
-	{
-		const int statX = centerX + static_cast<int>(index) * (statWidth + statGap);
-		const int width = index + 1 == m_statCards.size() ? centerRight - statX : statWidth;
-		place(m_statCards[index], statX, statsY, width, statsHeight);
-		place(m_statTitles[index], statX + 4, statsY + 8, width - 8, 26);
-		place(m_statValues[index], statX + 4, statsY + 37, width - 8, 43);
-	}
+	place(m_kpiBar, margin, statsY, clientWidth - margin * 2, statsHeight);
 
 	if (m_rightPanelExpanded && m_hallCallList.GetHeaderCtrl() != nullptr)
 	{
@@ -628,6 +692,70 @@ void CElevatorSimulationDlg::RelayoutUI()
 		m_algorithmCandidateList.SetColumnWidth(4, 0);
 		m_algorithmCandidateList.SetColumnWidth(5, toDevice(listWidth * 34 / 100));
 	}
+	RedrawWindow(nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+}
+
+void CElevatorSimulationDlg::UpdateLeftPanelVisibility()
+{
+	const bool configurationPage = m_leftTabs.GetCurSel() != 1;
+	const int configurationCommand = configurationPage ? SW_SHOW : SW_HIDE;
+	const int manualCommand = configurationPage ? SW_HIDE : SW_SHOW;
+	m_parameterSection.ShowWindow(configurationCommand);
+	for (auto& label : m_parameterLabels)
+		label.ShowWindow(configurationCommand);
+	for (int controlId : ParameterControlIds)
+		GetDlgItem(controlId)->ShowWindow(configurationCommand);
+	m_predictiveRebalancingCheck.ShowWindow(configurationCommand);
+
+	for (CWnd* control : {
+		static_cast<CWnd*>(&m_manualSection), static_cast<CWnd*>(&m_manualDescription),
+		static_cast<CWnd*>(&m_manualFloorEdit), static_cast<CWnd*>(&m_manualUpEdit),
+		static_cast<CWnd*>(&m_manualDownEdit), static_cast<CWnd*>(&m_addPassengersButton),
+		static_cast<CWnd*>(&m_manualFeedback) })
+	{
+		control->ShowWindow(manualCommand);
+	}
+	for (auto& label : m_manualLabels)
+		label.ShowWindow(manualCommand);
+	if (!configurationPage)
+	{
+		const auto snapshot = m_simulationWorker ? m_simulationWorker->GetLatestSnapshot() : nullptr;
+		UpdateManualDirectionLocks(snapshot, true);
+	}
+}
+
+void CElevatorSimulationDlg::UpdateManualDirectionLocks(
+	const std::shared_ptr<const SimulationUISnapshot>& snapshot, bool updateHint)
+{
+	if (!m_uiReady) return;
+	const bool manualAvailable = snapshot && snapshot->workerActive &&
+		(snapshot->state == SimulationState::Running ||
+		 snapshot->state == SimulationState::Paused);
+	CString floorText;
+	m_manualFloorEdit.GetWindowTextW(floorText);
+	floorText.Trim();
+	wchar_t* end = nullptr;
+	const long floor = std::wcstol(floorText.GetString(), &end, 10);
+	const bool validFloorText = !floorText.IsEmpty() && end != floorText.GetString() &&
+		*end == L'\0';
+	const bool groundFloorLock = validFloorText && floor == 1;
+	const bool topFloorLock = validFloorText && snapshot &&
+		floor == snapshot->config.floorCount;
+
+	m_manualFloorEdit.EnableWindow(manualAvailable);
+	m_manualUpEdit.EnableWindow(manualAvailable && !topFloorLock);
+	m_manualDownEdit.EnableWindow(manualAvailable && !groundFloorLock);
+	m_addPassengersButton.EnableWindow(manualAvailable);
+	if (topFloorLock) m_manualUpEdit.SetWindowTextW(L"0");
+	if (groundFloorLock) m_manualDownEdit.SetWindowTextW(L"0");
+	if (!updateHint) return;
+	if (topFloorLock)
+		SetTextIfChanged(m_manualFeedback, L"安全锁定：最高层只能添加下行乘客。");
+	else if (groundFloorLock)
+		SetTextIfChanged(m_manualFeedback, L"安全锁定：1 层只能添加上行乘客。");
+	else
+		SetTextIfChanged(m_manualFeedback,
+			L"运行或暂停时可添加；提交后立即进入当前模型时刻。");
 }
 
 void CElevatorSimulationDlg::UpdateTabPageVisibility()
@@ -641,29 +769,31 @@ void CElevatorSimulationDlg::UpdateTabPageVisibility()
 	{
 		control->ShowWindow(realTimeCommand);
 	}
-	UpdateRightPanelVisibility();
 	m_pagePlaceholder.ShowWindow(SW_HIDE);
 	m_statisticsTrendView.ShowWindow(page == 1 ? SW_SHOW : SW_HIDE);
 	m_floorTrafficHeatmapView.ShowWindow(page == 1 ? SW_SHOW : SW_HIDE);
 	m_algorithmPageSummary.ShowWindow(page == 2 ? SW_SHOW : SW_HIDE);
-	m_algorithmCandidateList.ShowWindow(
-		page == 2 || (realTimePage && m_rightPanelExpanded) ? SW_SHOW : SW_HIDE);
+	m_algorithmCandidateList.ShowWindow(page == 2 ? SW_SHOW : SW_HIDE);
 	m_floorCoverageView.ShowWindow(page == 2 ? SW_SHOW : SW_HIDE);
+	UpdateLeftPanelVisibility();
+	UpdateRightPanelVisibility();
 	RelayoutUI();
 }
 
 void CElevatorSimulationDlg::UpdateRightPanelVisibility()
 {
 	const bool panelVisible = m_pageTabs.GetCurSel() == 0 && m_rightPanelExpanded;
-	m_rightTabs.ShowWindow(SW_HIDE);
-	m_rightHallCallTitle.ShowWindow(panelVisible ? SW_SHOW : SW_HIDE);
-	m_hallCallList.ShowWindow(panelVisible ? SW_SHOW : SW_HIDE);
-	m_elevatorDetailTitle.ShowWindow(panelVisible ? SW_SHOW : SW_HIDE);
-	m_elevatorDetailBody.ShowWindow(panelVisible ? SW_SHOW : SW_HIDE);
-	m_rightAlgorithmTitle.ShowWindow(panelVisible ? SW_SHOW : SW_HIDE);
-	m_algorithmPlaceholder.ShowWindow(panelVisible ? SW_SHOW : SW_HIDE);
+	const int selectedTab = m_rightTabs.GetCurSel();
+	m_rightTabs.ShowWindow(panelVisible ? SW_SHOW : SW_HIDE);
+	m_rightHallCallTitle.ShowWindow(panelVisible && selectedTab == 0 ? SW_SHOW : SW_HIDE);
+	m_hallCallList.ShowWindow(panelVisible && selectedTab == 0 ? SW_SHOW : SW_HIDE);
+	m_elevatorDetailTitle.ShowWindow(panelVisible && selectedTab == 1 ? SW_SHOW : SW_HIDE);
+	m_elevatorDetailBody.ShowWindow(panelVisible && selectedTab == 1 ? SW_SHOW : SW_HIDE);
+	m_rightAlgorithmTitle.ShowWindow(panelVisible && selectedTab == 2 ? SW_SHOW : SW_HIDE);
+	m_algorithmPlaceholder.ShowWindow(panelVisible && selectedTab == 2 ? SW_SHOW : SW_HIDE);
 	if (m_pageTabs.GetCurSel() == 0)
-		m_algorithmCandidateList.ShowWindow(panelVisible ? SW_SHOW : SW_HIDE);
+		m_algorithmCandidateList.ShowWindow(
+			panelVisible && selectedTab == 2 ? SW_SHOW : SW_HIDE);
 }
 
 void CElevatorSimulationDlg::UpdateSpeedDisplay(double speed)
@@ -683,20 +813,130 @@ void CElevatorSimulationDlg::OnGetMinMaxInfo(MINMAXINFO* lpMMI)
 {
 	CDialogEx::OnGetMinMaxInfo(lpMMI);
 	const UINT dpi = GetDpiForWindow(m_hWnd);
-	lpMMI->ptMinTrackSize.x = MulDiv(1120, dpi, 96);
-	lpMMI->ptMinTrackSize.y = MulDiv(700, dpi, 96);
+	lpMMI->ptMinTrackSize.x = MulDiv(1240, dpi, 96);
+	lpMMI->ptMinTrackSize.y = MulDiv(760, dpi, 96);
 }
 
-void CElevatorSimulationDlg::SetSpeedPreset(const wchar_t* speedText)
+double CElevatorSimulationDlg::SpeedFromSlider(int position) const
 {
-	SetDlgItemTextW(IDC_EDIT_SPEED, speedText);
-	UpdateSpeedDisplay(_wtof(speedText));
+	return position * kSpeedSliderStep;
 }
 
-void CElevatorSimulationDlg::OnBnClickedSpeed1() { SetSpeedPreset(L"1"); }
-void CElevatorSimulationDlg::OnBnClickedSpeed2() { SetSpeedPreset(L"2"); }
-void CElevatorSimulationDlg::OnBnClickedSpeed5() { SetSpeedPreset(L"5"); }
-void CElevatorSimulationDlg::OnBnClickedSpeed10() { SetSpeedPreset(L"10"); }
+int CElevatorSimulationDlg::SliderFromSpeed(double speed) const
+{
+	const double clamped = (std::max)(kSpeedSliderMin * kSpeedSliderStep,
+		(std::min)(speed, kSpeedSliderMax * kSpeedSliderStep));
+	return (std::max)(kSpeedSliderMin,
+		(std::min)(kSpeedSliderMax, static_cast<int>(std::lround(clamped / kSpeedSliderStep))));
+}
+
+void CElevatorSimulationDlg::OnHScroll(UINT nSBCode, UINT /*nPos*/, CScrollBar* pScrollBar)
+{
+	if (pScrollBar == nullptr ||
+		pScrollBar->GetDlgCtrlID() != IDC_SLIDER_SPEED)
+		return;
+	if (nSBCode == SB_THUMBTRACK)
+		m_speedSliderDragging = true;
+	else if (nSBCode == SB_ENDSCROLL)
+		m_speedSliderDragging = false;
+	const double speed = SpeedFromSlider(m_speedSlider.GetPos());
+	ApplySimulationSpeed(speed);
+}
+
+void CElevatorSimulationDlg::ApplySimulationSpeed(double speed)
+{
+	if (!m_uiReady || !m_simulationWorker)
+		return;
+	// 同步到配置编辑框与头部显示；若正在运行/暂停则实时生效到仿真线程。
+	const auto snapshot = m_simulationWorker->GetLatestSnapshot();
+	const bool active = snapshot && snapshot->workerActive;
+	const bool liveChange = active &&
+		(snapshot->state == SimulationState::Running ||
+			snapshot->state == SimulationState::Paused);
+	CString text;
+	text.Format(L"%g", speed);
+	SetDlgItemTextW(IDC_EDIT_SPEED, text);
+	UpdateSpeedDisplay(speed);
+	if (liveChange)
+		m_simulationWorker->SetSimulationSpeed(speed);
+}
+
+void CElevatorSimulationDlg::OnTcnSelchangeLeftTabs(NMHDR*, LRESULT* pResult)
+{
+	UpdateLeftPanelVisibility();
+	RelayoutUI();
+	*pResult = 0;
+}
+
+void CElevatorSimulationDlg::OnEnChangeManualFloor()
+{
+	const auto snapshot = m_simulationWorker ? m_simulationWorker->GetLatestSnapshot() : nullptr;
+	UpdateManualDirectionLocks(snapshot, true);
+}
+
+void CElevatorSimulationDlg::OnBnClickedAddPassengers()
+{
+	const auto snapshot = m_simulationWorker ? m_simulationWorker->GetLatestSnapshot() : nullptr;
+	if (!snapshot || !snapshot->workerActive ||
+		(snapshot->state != SimulationState::Running &&
+		 snapshot->state != SimulationState::Paused))
+	{
+		CString message = L"请先启动仿真，再添加手动客流。";
+		ShowManualInputError(m_manualFloorEdit, message);
+		return;
+	}
+
+	int floor = 0;
+	int upCount = 0;
+	int downCount = 0;
+	if (!ReadManualInteger(m_manualFloorEdit, L"出发楼层", floor) ||
+		!ReadManualInteger(m_manualUpEdit, L"上行人数", upCount) ||
+		!ReadManualInteger(m_manualDownEdit, L"下行人数", downCount))
+	{
+		return;
+	}
+	if (floor < 1 || floor > snapshot->config.floorCount)
+	{
+		CString message;
+		message.Format(L"出发楼层范围是 1~%d。", snapshot->config.floorCount);
+		ShowManualInputError(m_manualFloorEdit, message);
+		return;
+	}
+	constexpr int MaximumManualCount = 500;
+	if (upCount < 0 || upCount > MaximumManualCount)
+	{
+		ShowManualInputError(m_manualUpEdit, L"上行人数范围是 0~500。");
+		return;
+	}
+	if (downCount < 0 || downCount > MaximumManualCount)
+	{
+		ShowManualInputError(m_manualDownEdit, L"下行人数范围是 0~500。");
+		return;
+	}
+	if (upCount == 0 && downCount == 0)
+	{
+		ShowManualInputError(m_manualUpEdit, L"上行和下行人数不能同时为 0。");
+		return;
+	}
+	if (floor == snapshot->config.floorCount && upCount > 0)
+	{
+		ShowManualInputError(m_manualUpEdit, L"最高层不能添加上行乘客。");
+		return;
+	}
+	if (floor == 1 && downCount > 0)
+	{
+		ShowManualInputError(m_manualDownEdit, L"1 层不能添加下行乘客。");
+		return;
+	}
+
+	m_simulationWorker->AddPassengers(floor, upCount, downCount);
+	CString feedback;
+	feedback.Format(L"已提交：%d 层，上行 %d 人，下行 %d 人。",
+		floor, upCount, downCount);
+	SetTextIfChanged(m_manualFeedback, feedback);
+	m_manualUpEdit.SetWindowTextW(L"0");
+	m_manualDownEdit.SetWindowTextW(L"0");
+}
 
 void CElevatorSimulationDlg::OnBnClickedPanelToggle()
 {
@@ -753,6 +993,7 @@ LRESULT CElevatorSimulationDlg::OnElevatorSelectionChanged(WPARAM wParam, LPARAM
 		ShowObservationEmptyState(
 			L"当前没有可观察的外呼请求；新外呼出现后将自动显示候选评分");
 	}
+	m_rightTabs.SetCurSel(1);
 	UpdateRightPanelVisibility();
 	RelayoutUI();
 	RefreshSimulationView();
@@ -787,7 +1028,7 @@ void CElevatorSimulationDlg::InitializeListControls()
 	m_algorithmCandidateList.InsertColumn(1, L"到达（秒）", LVCFMT_RIGHT, 110);
 	m_algorithmCandidateList.InsertColumn(2, L"成本", LVCFMT_RIGHT, 90);
 	m_algorithmCandidateList.InsertColumn(3, L"可行", LVCFMT_CENTER, 70);
-	m_algorithmCandidateList.InsertColumn(4, L"预计载客", LVCFMT_RIGHT, 110);
+	m_algorithmCandidateList.InsertColumn(4, L"估计载荷", LVCFMT_RIGHT, 110);
 	m_algorithmCandidateList.InsertColumn(5, L"备注", LVCFMT_LEFT, 220);
 }
 
@@ -809,6 +1050,37 @@ bool CElevatorSimulationDlg::ReadIntControl(int controlId, const wchar_t* fieldN
 	}
 	value = static_cast<int>(parsed);
 	return true;
+}
+
+bool CElevatorSimulationDlg::ReadManualInteger(
+	CEdit& control, const wchar_t* fieldName, int& value)
+{
+	CString text;
+	control.GetWindowTextW(text);
+	text.Trim();
+	errno = 0;
+	wchar_t* end = nullptr;
+	const long parsed = std::wcstol(text.GetString(), &end, 10);
+	if (text.IsEmpty() || end == text.GetString() || *end != L'\0' || errno == ERANGE ||
+		parsed < (std::numeric_limits<int>::min)() || parsed > (std::numeric_limits<int>::max)())
+	{
+		CString message;
+		message.Format(L"%s 必须是有效整数。", fieldName);
+		ShowManualInputError(control, message);
+		return false;
+	}
+	value = static_cast<int>(parsed);
+	return true;
+}
+
+void CElevatorSimulationDlg::ShowManualInputError(CEdit& control, const CString& message)
+{
+	CString feedback = L"输入有误：";
+	feedback += message;
+	SetTextIfChanged(m_manualFeedback, feedback);
+	MessageBeep(MB_ICONWARNING);
+	control.SetFocus();
+	control.SetSel(0, -1);
 }
 
 bool CElevatorSimulationDlg::ReadDoubleControl(int controlId, const wchar_t* fieldName, double& value)
@@ -900,8 +1172,18 @@ void CElevatorSimulationDlg::UpdateControlStates(
 	const bool fixedScenario =
 		m_trafficScenarioCombo.GetCurSel() == static_cast<int>(TrafficScenario::Fixed);
 	m_trafficPatternCombo.EnableWindow(active && ready && fixedScenario);
-	for (auto& speedButton : m_speedButtons)
-		speedButton.EnableWindow(active && ready);
+	const bool finished = state == SimulationState::Finished;
+	// 倍速滑块在就绪/运行/暂停时都可调；运行与暂停实时生效，就绪时写入配置。
+	m_speedSlider.EnableWindow(active && !finished);
+	// 就绪时快照仍是旧默认值，不能用来覆盖滑块；运行/暂停时才由快照驱动，
+	// 用户拖动期间不覆盖，避免回弹。
+	if (active && snapshot && !ready && !finished && !m_speedSliderDragging)
+	{
+		m_speedSlider.SetPos(std::clamp(
+			SliderFromSpeed(snapshot->config.simulationSpeed),
+			kSpeedSliderMin, kSpeedSliderMax));
+	}
+	UpdateManualDirectionLocks(snapshot, false);
 }
 
 void CElevatorSimulationDlg::UpdateElevatorDetails(
@@ -995,6 +1277,7 @@ void CElevatorSimulationDlg::UpdateStatisticsTrend(
 void CElevatorSimulationDlg::SelectHallCall(HallCallIdentity identity)
 {
 	BeginHallCallObservation(identity);
+	m_rightTabs.SetCurSel(2);
 	UpdateRightPanelVisibility();
 	RelayoutUI();
 }
@@ -1319,15 +1602,14 @@ void CElevatorSimulationDlg::RefreshSimulationView(bool forceBuildingRefresh)
 		m_rebuildingHallCallList = false;
 	}
 
-	CString statisticValues[6];
+	std::array<CString, 6> statisticValues;
 	statisticValues[0].Format(L"%zu", statistics.totalPassengerCount);
 	statisticValues[1].Format(L"%zu", statistics.waitingCount);
 	statisticValues[2].Format(L"%zu", statistics.ridingCount);
 	statisticValues[3].Format(L"%zu", statistics.arrivedCount);
 	statisticValues[4].Format(L"%.2f 秒", statistics.averageWaitingTime);
 	statisticValues[5].Format(L"%.2f 秒", statistics.maxWaitingTime);
-	for (std::size_t index = 0; index < m_statValues.size(); ++index)
-		SetTextIfChanged(m_statValues[index], statisticValues[index]);
+	m_kpiBar.SetValues(statisticValues);
 	UpdateControlStates(snapshot);
 }
 

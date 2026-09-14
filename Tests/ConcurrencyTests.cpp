@@ -185,6 +185,20 @@ int main()
         }
     });
 
+    tests.Run("observable dispatch is deterministic across execution and Update sizes", [&] {
+        auto config=TestConfig(); config.simulationDuration=20; config.predictiveRebalancing=true;
+        Simulation sequential,parallel;
+        parallel.SetDispatcherExecutionMode(DispatcherExecutionMode::Parallel,4);
+        sequential.Initialize(config,20260909); parallel.Initialize(config,20260909);
+        sequential.Start(); parallel.Start();
+        for(int batch=0;batch<4;++batch) {
+            sequential.Update(5);
+            for(int frame=0;frame<40;++frame) parallel.Update(0.125);
+            SameState(tests,sequential,parallel);
+        }
+        tests.Check(sequential.ValidateState() && parallel.ValidateState(),"conservation across execution modes and frames");
+    });
+
     tests.Run("pause resume resets wall clock", [&]
     {
         auto config = TestConfig();
@@ -242,6 +256,26 @@ int main()
         if (!snapshot) throw std::runtime_error("worker did not reset");
         tests.Check(snapshot->randomSeed == 1234 && snapshot->statistics.totalPassengerCount == 0,
             "reset restores initial fixed-seed state");
+    });
+
+    tests.Run("worker queues manual directional passengers", [&]
+    {
+        auto config = TestConfig();
+        config.passengerRate = 0.0;
+        SimulationWorker worker(config, 88, DispatcherExecutionMode::Parallel, 2);
+        auto snapshot = WaitForSnapshot(worker,
+            [](const auto& value) { return value.state == SimulationState::Ready; },
+            std::chrono::seconds(2));
+        if (!snapshot) throw std::runtime_error("worker did not initialize for manual passengers");
+        worker.AddPassengers(7, 3, 2);
+        snapshot = WaitForSnapshot(worker,
+            [](const auto& value) { return value.statistics.totalPassengerCount == 5; },
+            std::chrono::seconds(2));
+        if (!snapshot) throw std::runtime_error("worker did not publish manual passengers");
+        const auto floor = std::find_if(snapshot->floors.begin(), snapshot->floors.end(),
+            [](const FloorSnapshot& item) { return item.floorNumber == 7; });
+        tests.Check(floor != snapshot->floors.end() && floor->upWaitingCount == 3 &&
+            floor->downWaitingCount == 2, "worker preserves manual direction counts");
     });
 
     tests.Run("worker publishes and clears read-only observation", [&]

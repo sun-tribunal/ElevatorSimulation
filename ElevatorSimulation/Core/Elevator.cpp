@@ -42,38 +42,16 @@ ElevatorDispatchSnapshot Elevator::GetDispatchSnapshot() const
     snapshot.reservedBoardingCount = m_state == ElevatorState::Boarding ? 1 : 0;
     snapshot.upTasks.assign(m_upTasks.begin(), m_upTasks.end());
     snapshot.downTasks.assign(m_downTasks.begin(), m_downTasks.end());
-    std::set<int> serviceFloors(m_upTasks.begin(), m_upTasks.end());
-    serviceFloors.insert(m_downTasks.begin(), m_downTasks.end());
+    // 仅导出已经 Boarded 后可见的内呼集合；同层多人不暴露人数。
+    std::set<int> carFloors(m_carCalls.begin(), m_carCalls.end());
     for (const auto& destination : m_destinations)
-        serviceFloors.insert(destination.second);
-    if (m_state == ElevatorState::Boarding)
-        serviceFloors.insert(m_pendingTarget);
-    for (int floor : serviceFloors)
-    {
-        int alightingCount = 0;
-        for (const auto& destination : m_destinations)
-            if (destination.second == floor) ++alightingCount;
-        if (m_state == ElevatorState::Boarding && m_pendingTarget == floor)
-            ++alightingCount;
-        if (alightingCount != 0)
-            snapshot.stopServices.push_back({ floor, Direction::Idle, alightingCount, 0 });
-        if (m_upHallCalls.count(floor) != 0)
-            snapshot.stopServices.push_back({ floor, Direction::Up, 0,
-                m_state == ElevatorState::Boarding && floor == m_currentFloor && m_direction == Direction::Up ? 0 : 1 });
-        if (m_downHallCalls.count(floor) != 0)
-            snapshot.stopServices.push_back({ floor, Direction::Down, 0,
-                m_state == ElevatorState::Boarding && floor == m_currentFloor && m_direction == Direction::Down ? 0 : 1 });
-        if (alightingCount == 0 && (m_carCalls.count(floor) != 0 ||
-            (m_upHallCalls.count(floor) == 0 && m_downHallCalls.count(floor) == 0)))
-            snapshot.stopServices.push_back({ floor, Direction::Idle, 0, 0 });
-    }
-    if (m_state == ElevatorState::Boarding)
-    {
-        auto& tasks = m_direction == Direction::Up ? snapshot.upTasks : snapshot.downTasks;
-        tasks.push_back(m_pendingTarget);
-        std::sort(tasks.begin(), tasks.end());
-        tasks.erase(std::unique(tasks.begin(), tasks.end()), tasks.end());
-    }
+        carFloors.insert(destination.second);
+    for (int floor : carFloors)
+        snapshot.stopServices.push_back({ floor, Direction::Idle });
+    for (int floor : m_upHallCalls)
+        snapshot.stopServices.push_back({ floor, Direction::Up });
+    for (int floor : m_downHallCalls)
+        snapshot.stopServices.push_back({ floor, Direction::Down });
     return snapshot;
 }
 

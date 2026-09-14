@@ -97,7 +97,7 @@ namespace
             if(passenger==people.end() || car.state!=ElevatorState::MovingUp || car.passengerCount!=1)
                 throw std::runtime_error("full upward fixture changed");
             ElevatorDispatchSnapshot snapshot; snapshot.elevator=car; snapshot.floorCount=20;
-            snapshot.betweenFloors=true; snapshot.upTasks={20}; snapshot.stopServices={{20,Direction::Idle,1,0}};
+            snapshot.betweenFloors=true; snapshot.upTasks={20}; snapshot.stopServices={{20,Direction::Idle}};
             snapshot.remainingActionTime=2-(simulation.GetCurrentTime()-passenger->boardTime-
                 (car.currentFloor-passenger->startFloor)*2);
             snapshots.push_back(std::move(snapshot));
@@ -407,33 +407,60 @@ int main()
         simulation.Start(); simulation.Update(0.5); tests.Check(simulation.GetHallCallSnapshots().size()==2,"two directions");
         simulation.Update(50); tests.Check(simulation.GetStatisticsSnapshot().arrivedCount==2 && simulation.ValidateState(),"both served");
     });
-    tests.Run("dispatch snapshots preserve FIFO targets and skip boarding reservation", [&] {
+    tests.Run("one versus many waiting passengers leaves route estimates identical", [&] {
+        auto config=Config(); config.floorCount=20;
+        Simulation one,many; one.Initialize(config,42); many.Initialize(config,42);
+        one.AddPassenger(4,6); many.AddPassenger(4,18);
+        for(int i=0;i<5;++i) many.AddPassenger(4,19);
+        one.AddPassenger(8,12); many.AddPassenger(8,12);
+        one.Start(); many.Start(); one.Update(0.125); many.Update(0.125);
+        tests.Check(one.GetStatisticsSnapshot().ridingCount==0 && many.GetStatisticsSnapshot().ridingCount==0,
+            "no passenger has boarded");
+        for(int floor:{4,8}) {
+            const auto left=one.GetDispatchObservation(floor,Direction::Up);
+            auto right=many.GetDispatchObservation(floor,Direction::Up);
+            if(floor==4) tests.Check(left.waitingCount==1 && right.waitingCount==6,"real one and six waiting");
+            right.waitingCount=left.waitingCount;
+            SameObservation(tests,left,right);
+            for(std::size_t i=0;i<left.candidates.size();++i)
+                tests.Check(left.candidates[i].eta==right.candidates[i].eta &&
+                    left.candidates[i].cost==right.candidates[i].cost,"exact score equality including other hall routes");
+        }
+    });
+    tests.Run("waiting targets and queue length are invisible to dispatch", [&] {
         auto config=Config(); config.floorCount=20; config.moveTimePerFloor=1;
         config.personTime=1; config.simulationDuration=200;
-        for(bool nearFirst:{true,false})
-        {
-            Simulation simulation; simulation.Initialize(config,42);
-            simulation.AddPassenger(1,12); // 当前 Boarding 者必须跳过，未来目标已经由 Elevator 提供。
-            simulation.AddPassenger(1,nearFirst ? 6 : 12);
-            simulation.AddPassenger(1,nearFirst ? 12 : 6);
-            for(int passenger=0;passenger<2;++passenger)
-            {
-                simulation.AddPassenger(20,1);
-                simulation.AddPassenger(10,20);
+        for(bool many:{false,true}) {
+            Simulation a,b; a.Initialize(config,42); b.Initialize(config,42);
+            for(auto* simulation:{&a,&b}) {
+                simulation->AddPassenger(1,12);
+                simulation->AddPassenger(20,1);
+                simulation->AddPassenger(10,20);
             }
-            simulation.Start(); simulation.Update(0.1);
-            tests.Check(simulation.GetElevatorSnapshots()[0].state==ElevatorState::Boarding &&
-                simulation.GetFloorSnapshots()[0].upWaitingCount==3,"pending person remains queue head");
-            simulation.AddPassenger(8,9); simulation.Update(0.01);
-            int owner=InvalidElevatorId;
-            for(const auto& call:simulation.GetHallCallSnapshots())
-                if(call.floorNumber==8 && call.direction==Direction::Up) owner=call.assignedElevatorId;
-            tests.Check(nearFirst ? owner==0 : owner!=0 && owner!=InvalidElevatorId,
-                "only the actual FIFO second passenger can free the second seat before 8F");
-            tests.Check(simulation.ValidateState(),"snapshot assembly does not change queue ownership");
-            simulation.Update(190);
-            tests.Check(simulation.GetStatisticsSnapshot().arrivedCount==8 && simulation.ValidateState(),
-                "all known passengers still delivered");
+            a.AddPassenger(1,6); b.AddPassenger(1,18);
+            if(many) for(int count=0;count<5;++count) b.AddPassenger(1,19);
+            a.Start(); b.Start(); a.Update(0.1); b.Update(0.1);
+            tests.Check(a.GetElevatorSnapshots()[0].state==ElevatorState::Boarding &&
+                b.GetElevatorSnapshots()[0].state==ElevatorState::Boarding,"head still boarding, all others waiting");
+            // 第二个外呼让队列信息有机会污染联合分配、改派及中途停站的 ETA。
+            a.AddPassenger(8,9); b.AddPassenger(8,15); a.Update(0.01); b.Update(0.01);
+            for(int floor:{1,8,10,20}) {
+                const auto direction=floor==20 ? Direction::Down : Direction::Up;
+                const auto left=a.GetDispatchObservation(floor,direction);
+                auto right=b.GetDispatchObservation(floor,direction);
+                tests.Check(left.valid && right.valid,"real hall call remains active");
+                if(floor==1) tests.Check(right.waitingCount==left.waitingCount+(many ? 5 : 0),
+                    "UI retains real queue count");
+                right.waitingCount=left.waitingCount; // 仅 UI 人数允许不同。
+                SameObservation(tests,left,right);
+                for(std::size_t i=0;i<left.candidates.size();++i)
+                    tests.Check(left.candidates[i].eta==right.candidates[i].eta &&
+                        left.candidates[i].cost==right.candidates[i].cost,"scores and ETA exactly equal before Boarded");
+            }
+            a.Update(190); b.Update(190);
+            tests.Check(a.GetStatisticsSnapshot().arrivedCount==5 &&
+                b.GetStatisticsSnapshot().arrivedCount==(many ? 10u : 5u) &&
+                a.ValidateState() && b.ValidateState(),"both true queues still fully served");
         }
     });
     tests.Run("new request cannot reverse occupied car", [&] {
@@ -489,6 +516,29 @@ int main()
         tests.Check(simulation.AddPassenger(1,1)==-1 && simulation.AddPassenger(0,2)==-1 && simulation.AddPassenger(1,7)==-1,"bounds");
         tests.Check(simulation.AddPassenger(1,2)==0,"no ID consumed by invalid request"); simulation.Start(); simulation.Update(100);
         tests.Check(simulation.AddPassenger(1,2)==-1,"finished");
+    });
+    tests.Run("directional batch injection", [&] {
+        Simulation simulation; simulation.Initialize(Config(),42);
+        tests.Check(simulation.AddPassengersAtFloor(3,Direction::Up,4),"add upward batch");
+        tests.Check(simulation.AddPassengersAtFloor(3,Direction::Down,3),"add downward batch");
+        const auto passengers=simulation.GetPassengerSnapshots();
+        tests.Check(passengers.size()==7,"all batch passengers created");
+        for(const auto& passenger:passengers) {
+            tests.Check(passenger.startFloor==3,"batch start floor retained");
+            tests.Check((passenger.direction==Direction::Up && passenger.targetFloor>3) ||
+                (passenger.direction==Direction::Down && passenger.targetFloor<3),
+                "batch target follows requested direction");
+        }
+        const auto floors=simulation.GetFloorSnapshots();
+        tests.Check(floors[2].upWaitingCount==4 && floors[2].downWaitingCount==3,
+            "directional queues expose batch counts");
+        const std::size_t before=simulation.GetStatisticsSnapshot().totalPassengerCount;
+        tests.Check(!simulation.AddPassengersAtFloor(6,Direction::Up,1) &&
+            !simulation.AddPassengersAtFloor(1,Direction::Down,1) &&
+            !simulation.AddPassengersAtFloor(3,Direction::Idle,1) &&
+            !simulation.AddPassengersAtFloor(3,Direction::Up,0),"invalid batch rejected");
+        tests.Check(simulation.GetStatisticsSnapshot().totalPassengerCount==before &&
+            simulation.ValidateState(),"invalid batch preserves state");
     });
     tests.Run("IDs are not reused after arrival", [&] {
         Simulation simulation; simulation.Initialize(Config(),42); simulation.AddPassenger(1,2); simulation.Start(); simulation.Update(10);
@@ -903,9 +953,12 @@ int main()
         simulation.AddPassenger(15,20); simulation.Start(); simulation.Update(2);
         tests.Check(simulation.GetHallCallSnapshots()[0].assignedElevatorId==1,"E2 initially wins equal distance");
         simulation.AddPassenger(17,1); simulation.Update(2);
+        tests.Check(HallAt(simulation,15,Direction::Up).assignedElevatorId==1,
+            "unboarded down destination cannot yet trigger reassignment");
+        simulation.Update(5); // 17F 下行乘客在 9 秒完成 Boarded，1F 内呼现在才可见。
         int owner=-1;
         for(const auto& call:simulation.GetHallCallSnapshots()) if(call.floorNumber==15) owner=call.assignedElevatorId;
-        tests.Check(owner==2,"new down passenger makes E3 much faster for 15F up");
+        tests.Check(owner==2,"Boarded down passenger makes E3 much faster for 15F up");
         tests.Check(simulation.ValidateState(),"old elevator no longer owns reassigned call");
         for(int frame=0;frame<50;++frame)
         {
@@ -970,7 +1023,7 @@ int main()
         for(int floor=15;floor<=17;++floor)
         {
             const auto id=simulation.AddPassenger(floor,1);
-            active.push_back({floor,Direction::Down,simulation.GetCurrentTime(),id,1,{1}});
+            active.push_back({floor,Direction::Down,simulation.GetCurrentTime(),id});
         }
         const auto expected=dispatcher.PlanAssignments(active,snapshots,simulation.GetCurrentTime());
         tests.Check(active.size()==3 && expected.assignedCount==3,"full three-active-request joint plan exists");
@@ -1275,25 +1328,19 @@ int main()
                     result.push_back(elevator.repositionTargetFloor);
             return result;
         };
-        const auto mean=[](const std::vector<int>& floors)
-        {
-            double sum=0.0;
-            for(int floor:floors) sum+=floor;
-            return sum/floors.size();
-        };
-        const auto lowCount=[](const std::vector<int>& floors)
-        {
-            return std::count_if(floors.begin(),floors.end(),[](int floor) { return floor<=5; });
-        };
         const auto upTargets=targets(upPeak);
         const auto interTargets=targets(interFloor);
         const auto downTargets=targets(downPeak);
         tests.Check(!upTargets.empty() && !interTargets.empty() && !downTargets.empty(),
             "every OfficeDay phase exposes a reposition target distribution");
-        tests.Check(mean(upTargets)<mean(downTargets),
-            "UpPeak average reposition target is below DownPeak");
-        tests.Check(lowCount(interTargets)<lowCount(upTargets),
-            "InterFloor concentrates fewer reposition targets on low floors than UpPeak");
+        for(const auto* snapshot:{&upPeak,&interFloor,&downPeak}) {
+            const auto weights=FleetRebalancer::BuildDemandWeights(config.floorCount,snapshot->activeTrafficPattern);
+            for(const auto& coverage:snapshot->floorCoverage) {
+                double expected=0;
+                for(const auto& weight:weights) if(weight.floor==coverage.floor) expected+=weight.probability;
+                tests.Near(coverage.demandWeight,expected,"coverage uses the current phase demand weights");
+            }
+        }
         tests.Check(simulation.ValidateState(),"OfficeDay phase rebalancing state remains valid");
     });
     return tests.Finish();

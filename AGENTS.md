@@ -18,8 +18,8 @@
 - PascalCase 类名/函数，camelCase 局部变量，`m_` 成员；中文注释，RAII、STL、enum class、nullptr，新增代码避免裸 new/delete。
 - 用户已授权实现 Dispatcher/Elevator/Simulation，并对 Passenger/Floor/Statistics 作必要适配；不要把已实现功能退回占位，也不要擅自扩展正式动画或高级 AI 策略。
 - Dispatcher 只读评分；顺路与空闲统一比较 Cost/ETA，非顺路忙碌附加 S+T 成本，不设绝对等级。按 Cost、ETA、距离、任务数、ID 排序；当前满载梯若预测在请求层接客前释放容量，可以参与候选；若到请求层完成下客后仍满载，则不分配。禁止直接操作 Elevator 的状态。
-- ETA 与 Elevator LOOK 一致：用所有前方内呼和双向外呼决定继续扫描/折返，只在内呼或同向外呼处服务。每批下客消费后清零；Alighting 当前一人仅计剩余时间，其余下客逐人计 T；Boarding 预留人数与未来下客只计一次。
-- Simulation 按 FIFO 填充调度快照中的真实 waitingCount 与 boardingTargetFloors（最多 capacity 人的前缀），排除当前 Boarding 队头预留者。Dispatcher 按剩余容量取前缀，并将实际上梯者目标层加入局部任务；LoadCost = T × 请求层完成下客后的 projectedOccupancy / capacity。保留 Aging 上限及既有接口。
+- ETA 与 Elevator LOOK 一致：所有前方内呼和双向外呼决定扫描/折返，只在内呼或同向外呼处服务。每个不同内呼最多估计下 1 人并消费一次；未知外呼固定计 T、有容量时最多估计上 1 人，不猜测目的层。Alighting 当前一人只计剩余时间并释放一席；Boarding 当前预留者只计一次且目的层在 Boarded 前隐藏。真实状态机仍逐人计 T。
+- Simulation 知道真实乘客状态，Dispatcher 只用传统上下行按钮可观测信息。调度快照禁止携带等待目的层、FIFO 前缀、真实 waitingCount 或精确上下客人数；UI/统计可保留 waitingCount。FIFO 仅用于实际 Floor::Peek / RemoveFront 服务。满载时按接客前已知 Car Call 估计释放席位；LoadCost = T × 接客前估计载荷 / capacity。Joint/Deferred/Reassignment/FleetRebalancer/Coverage 统一复用 ScoreSnapshot，由真实事件重评估修正误差。
 - Elevator 仅执行已接受任务，层间运动和上下客中不能因新请求反向。Advance 最多返回一个事件，调用方必须处理其余时间预算。
 - 时间全部以仿真秒处理，只有 Simulation::Update 将真实秒乘一次 simulationSpeed。同步处理所有电梯事件，不按电梯逐台推进整帧。
 - passengerRate 单位为全楼人数/仿真秒，Poisson 指数间隔。固定种子用于可重复测试；Reset 保留本轮 seed。

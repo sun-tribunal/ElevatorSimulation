@@ -29,8 +29,7 @@ namespace
         bool reachedRequest = false;
     };
 
-    // 仅在局部副本上预演 LOOK，不修改真实 Elevator。每个快照中的已知
-    // 下客/上客都按实际人数计时；Simulation 会在调用前回填外呼等待人数。
+    // 在局部副本上预演 LOOK：内呼估计下 1 人，外呼估计上 1 人，不猜测目的层。
     RouteEstimate EstimatePickupTime(int requestFloor, Direction requestDirection,
         const ElevatorDispatchSnapshot& snapshot)
     {
@@ -42,39 +41,25 @@ namespace
         std::set<int> up(snapshot.upTasks.begin(), snapshot.upTasks.end());
         std::set<int> down(snapshot.downTasks.begin(), snapshot.downTasks.end());
         std::set<int> carTargets;
-        std::map<int, int> alighting;
-        std::map<std::pair<int, Direction>, ElevatorDispatchSnapshot::StopService> boarding;
+        std::set<std::pair<int, Direction>> hallCalls;
         for (const auto& stop : snapshot.stopServices)
         {
             if (stop.floor < 1 || (snapshot.floorCount > 0 && stop.floor > snapshot.floorCount) ||
-                stop.alightingCount < 0 || stop.boardingCount < 0 ||
-                (stop.direction != Direction::Idle && !IsTravelDirection(stop.direction)) ||
-                stop.boardingTargetFloors.size() > static_cast<std::size_t>(stop.boardingCount))
+                (stop.direction != Direction::Idle && !IsTravelDirection(stop.direction)))
                 return result;
             if (stop.direction == Direction::Idle)
-            {
-                if (stop.boardingCount != 0 || stop.alightingCount > car.capacity - alighting[stop.floor])
-                    return result;
                 carTargets.insert(stop.floor);
-                alighting[stop.floor] += stop.alightingCount;
-            }
             else
             {
-                if (stop.alightingCount != 0 || !boarding.emplace(std::make_pair(stop.floor, stop.direction), stop).second)
-                    return result;
-                for (int target : stop.boardingTargetFloors)
-                    if (target < 1 || (snapshot.floorCount > 0 && target > snapshot.floorCount) ||
-                        GetDirection(stop.floor, target) != stop.direction)
-                        return result;
+                hallCalls.emplace(stop.floor, stop.direction);
                 (stop.direction == Direction::Up ? up : down).insert(stop.floor);
             }
         }
-        // upTasks/downTasks 原本混合内呼和外呼；Idle 服务记录将内呼独立出来，
-        // 内呼在任一方向到达都会停站，外呼仅在对应方向停站。旧任务快照仍可使用。
+        // 内呼在任一方向服务，双向外呼仅在各自方向服务。
         for (int target : carTargets)
         {
-            if (boarding.count({ target, Direction::Up }) == 0) up.erase(target);
-            if (boarding.count({ target, Direction::Down }) == 0) down.erase(target);
+            if (hallCalls.count({ target, Direction::Up }) == 0) up.erase(target);
+            if (hallCalls.count({ target, Direction::Down }) == 0) down.erase(target);
         }
         (requestDirection == Direction::Up ? up : down).insert(requestFloor);
         int floor = car.currentFloor;
@@ -84,57 +69,48 @@ namespace
             floor += direction == Direction::Up ? 1 : -1;
         if (car.state == ElevatorState::Alighting)
         {
-            // 当前人仍计入 passengerCount/下客记录，但只需 remainingActionTime。
-            // 先完成该人，循环内再消费同层其余下客，不能额外补一个完整 T。
-            if (alighting[floor] <= 0 || result.projectedOccupancy <= 0)
-                return result;
-            --alighting[floor];
+            // 当前下客者只计动作剩余时间；同层内呼不再额外释放第二个席位。
+            if (result.projectedOccupancy <= 0) return result;
             --result.projectedOccupancy;
+            carTargets.erase(floor);
         }
-        if (car.state == ElevatorState::Stopped || car.state == ElevatorState::Boarding ||
-            car.state == ElevatorState::Alighting)
-            carTargets.insert(floor); // 当前停站必须完成，即使内呼已从真实任务集中移除。
+        if (car.state == ElevatorState::Boarding)
+        {
+            // 当前外呼的一人估计已由预留席位和动作剩余时间覆盖。
+            (direction == Direction::Up ? up : down).erase(floor);
+        }
         if (car.state == ElevatorState::Idle)
             direction = floor == requestFloor ? requestDirection : GetDirection(floor, requestFloor);
 
-        // 每个外呼只服务一次，新增内呼只能来自这些有限的已知上客目标。
-        // 每次扫描都会消费停站或到最远任务折返，因此无需按固定停靠次数截断。
-        while (!up.empty() || !down.empty() || !carTargets.empty())
+        // 每个不同内呼只消费一次；未知外呼不会创建未来内呼或延长扫描终点。
+        bool currentStop = !snapshot.betweenFloors &&
+            (car.state == ElevatorState::Stopped || car.state == ElevatorState::Boarding ||
+                car.state == ElevatorState::Alighting);
+        while (currentStop || !up.empty() || !down.empty() || !carTargets.empty())
         {
             auto& active = direction == Direction::Up ? up : down;
-            if (carTargets.erase(floor) != 0 || active.count(floor) != 0)
+            const bool carStop = carTargets.erase(floor) != 0;
+            if (currentStop || carStop || active.count(floor) != 0)
             {
-                int& due = alighting[floor];
-                if (due > result.projectedOccupancy) return result;
-                result.projectedOccupancy -= due;
-                time += static_cast<double>(due) * snapshot.personTime;
-                due = 0; // 下客是可消费事件；返程/切换外呼方向不能再次释放这一批容量。
+                currentStop = false;
+                if (carStop && result.projectedOccupancy > 0)
+                {
+                    --result.projectedOccupancy;
+                    time += snapshot.personTime;
+                }
                 if (floor == requestFloor && direction == requestDirection)
                 {
-                    // ETA 为可以开始接本外呼的时刻，包含请求层先下客的时间。
+                    // ETA 到请求层估计下客完成为止，尚未计本外呼的上客。
                     result.eta = time;
                     result.reachedRequest = result.projectedOccupancy < car.capacity;
                     return result;
                 }
                 if (active.erase(floor) != 0)
                 {
-                    const auto service = boarding.find({ floor, direction });
-                    if (service != boarding.end())
-                    {
-                        const int actualBoarding = (std::min)(service->second.boardingCount,
-                            car.capacity - result.projectedOccupancy);
-                        result.projectedOccupancy += actualBoarding;
-                        time += static_cast<double>(actualBoarding) * snapshot.personTime;
-                        const auto& targets = service->second.boardingTargetFloors;
-                        const auto knownCount = (std::min)(targets.size(), static_cast<std::size_t>(actualBoarding));
-                        for (std::size_t passenger = 0; passenger < knownCount; ++passenger)
-                        {
-                            carTargets.insert(targets[passenger]);
-                            ++alighting[targets[passenger]];
-                        }
-                        // 未上梯者交还 Simulation 重分配，不能在此次预演中重复登梯。
-                        boarding.erase(service);
-                    }
+                    // 未知停站固定计一个 T；有剩余容量时估计上 1 人。
+                    time += snapshot.personTime;
+                    if (result.projectedOccupancy < car.capacity)
+                        ++result.projectedOccupancy;
                 }
             }
             int nextFloor = floor;
@@ -176,10 +152,7 @@ namespace
         tasks.push_back(request.floor);
         std::sort(tasks.begin(), tasks.end());
         tasks.erase(std::unique(tasks.begin(), tasks.end()), tasks.end());
-        ElevatorDispatchSnapshot::StopService service{ request.floor, request.direction, 0, request.waitingCount };
-        const auto count = (std::min)(request.targetFloors.size(), static_cast<std::size_t>(snapshot.elevator.capacity));
-        service.boardingTargetFloors.assign(request.targetFloors.begin(), request.targetFloors.begin() + count);
-        snapshot.stopServices.push_back(std::move(service));
+        snapshot.stopServices.push_back({ request.floor, request.direction });
         if (snapshot.elevator.state == ElevatorState::Idle)
         {
             // 与真实 AddHallCall 一致：第一项任务锁定起步方向；后续组合不能重选方向。
@@ -334,7 +307,7 @@ DispatchScore ElevatorDispatcher::ScoreSnapshot(int requestFloor, Direction requ
     // 顺路与空闲统一比较成本。非顺路忙碌梯增加 S+T 的有限策略成本，
     // 实际返程/折返耗时已计入 ETA；该附加项不代表额外物理耗时。
     const double directionCost = idle || onWay ? 0.0 : snapshot.moveTimePerFloor + snapshot.personTime;
-    // 以请求层完成下客、尚未接本外呼时的预计载荷评分，附加不超过一个 T。
+    // 以请求层完成下客、尚未接本外呼时的估计载荷评分，附加不超过一个 T。
     const double loadCost = snapshot.personTime * static_cast<double>(estimate.projectedOccupancy) / car.capacity;
     // Aging 抵消有限方向惩罚，保持已验证的 Cost 口径。
     score.directionPenalty = (std::max)(0.0, directionCost - GetAgingBonus(requestTime, currentTime));
@@ -457,10 +430,7 @@ DispatchPlan ElevatorDispatcher::PlanAssignments(const std::vector<HallCallDispa
             return;
         }
         const auto& request=requests[order[depth]];
-        bool valid = request.waitingCount > 0 && std::isfinite(request.firstRequestTime) &&
-            request.targetFloors.size() <= static_cast<std::size_t>(request.waitingCount);
-        for (int target:request.targetFloors)
-            valid = valid && target >= 1 && GetDirection(request.floor,target)==request.direction;
+        const bool valid = std::isfinite(request.firstRequestTime);
         std::vector<std::pair<int,DispatchScore>> candidates;
         if (valid)
         {

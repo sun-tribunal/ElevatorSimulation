@@ -162,11 +162,17 @@ void StatisticsTrendView::DrawChart(CDC& dc, const CRect& bounds, const wchar_t*
 	CRect zeroScale(bounds.left + 5, plot.bottom - 9, plot.left - 4, plot.bottom + 9);
 	dc.DrawTextW(L"0", zeroScale, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
 
+	// 横向仅显示最近 TrendWindowSeconds 秒的滚动窗口，避免随时间推移整段历史被压缩。
+	constexpr double TrendWindowSeconds = 60.0;
 	const double lastTime = (std::max)(m_points.back().time, 0.5);
+	const double windowStart = lastTime > TrendWindowSeconds ? lastTime - TrendWindowSeconds : 0.0;
+	const double windowSpan = (std::max)(lastTime - windowStart, 0.5);
 	CRect timeRect(plot.left, plot.bottom + 4, plot.right, bounds.bottom - 2);
-	dc.DrawTextW(L"0 秒", timeRect, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+	CString startTimeLabel;
+	startTimeLabel.Format(L"%.1f 秒", windowStart);
+	dc.DrawTextW(startTimeLabel, timeRect, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
 	CString endTimeLabel;
-	endTimeLabel.Format(L"%.1f 秒", m_points.back().time);
+	endTimeLabel.Format(L"%.1f 秒", lastTime);
 	dc.DrawTextW(endTimeLabel, timeRect, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
 
 	CPen dataPen(PS_SOLID, 2, color);
@@ -174,8 +180,11 @@ void StatisticsTrendView::DrawChart(CDC& dc, const CRect& bounds, const wchar_t*
 	bool first = true;
 	for (const auto& point : m_points)
 	{
+		// 只绘制最近窗口内的采样点；更早的历史不再参与横向布局。
+		if (point.time < windowStart)
+			continue;
 		const int x = plot.left + static_cast<int>(std::lround(
-			plot.Width() * (std::max)(0.0, point.time) / lastTime));
+			plot.Width() * (point.time - windowStart) / windowSpan));
 		const int y = plot.bottom - static_cast<int>(std::lround(
 			plot.Height() * valueOf(point) / scaleMaximum));
 		if (first)

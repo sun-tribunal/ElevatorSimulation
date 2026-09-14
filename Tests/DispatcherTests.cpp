@@ -13,8 +13,8 @@ namespace
         car.floorCount = 20;
         car.upTasks = std::move(up);
         car.downTasks = std::move(down);
-        for (int stop : car.upTasks) car.stopServices.push_back({ stop, Direction::Up, 0, 1 });
-        for (int stop : car.downTasks) car.stopServices.push_back({ stop, Direction::Down, 0, 1 });
+        for (int stop : car.upTasks) car.stopServices.push_back({ stop, Direction::Up });
+        for (int stop : car.downTasks) car.stopServices.push_back({ stop, Direction::Down });
         return car;
     }
 
@@ -32,13 +32,12 @@ namespace
             "route beats idle just above expected cost");
     }
 
-    HallCallDispatchSnapshot Call(int floor, Direction direction, std::vector<int> targets,
+    HallCallDispatchSnapshot Call(int floor, Direction direction,
         PassengerId id = 0, double time = 0.0)
     {
         HallCallDispatchSnapshot request;
         request.floor=floor; request.direction=direction;
         request.firstPassengerId=id; request.firstRequestTime=time;
-        request.waitingCount=static_cast<int>(targets.size()); request.targetFloors=std::move(targets);
         return request;
     }
 
@@ -131,207 +130,130 @@ int main()
         boarding.personTime=10; boarding.remainingActionTime=8; boarding.reservedBoardingCount=1;
         tests.Check(select(10,Direction::Up,{boarding,Car(1,7)})==1,"remaining action belongs in pickup ETA");
     });
-    tests.Run("multiple passenger events beat fixed stop estimate", [&] {
+    tests.Run("observable intermediate transfers have fixed costs", [&] {
         auto route=Car(0,5,Direction::Up,{7,8,15},{},2);
-        route.stopServices.clear();
-        route.stopServices.push_back({7,Direction::Idle,2,0});
-        route.stopServices.push_back({8,Direction::Up,0,3});
-        // Route ETA = 10 seconds movement + 15 seconds for five known transfers;
-        // the idle car reaches the request in 18 seconds.
-        tests.Check(select(10,Direction::Up,{route,Car(1,1)})==1,"all known passenger transfers count");
-        CheckCost(tests,route,10,Direction::Up,25.9);
+        route.stopServices={{7,Direction::Idle},{8,Direction::Up},{15,Direction::Up}};
+        // 移动 10，下客 3，上客 3，估计载荷 2/10。
+        CheckCost(tests,route,10,Direction::Up,16.6);
     });
-    tests.Run("known alighting count affects ETA", [&] {
-        auto route=Car(0,5,Direction::Up,{7,15},{},3);
-        route.stopServices.clear();
-        route.stopServices.push_back({7,Direction::Idle,3,0});
-        tests.Check(select(10,Direction::Up,{route,Car(1,1)})==1,"known alighting passengers add T each");
-        CheckCost(tests,route,10,Direction::Up,19);
+    tests.Run("full car needs a known car call before pickup", [&] {
+        auto full=Car(0,1,Direction::Up,{5},{},2,2);
+        tests.Check(!dispatcher.ScoreSnapshot(10,Direction::Up,full).feasible,"hall call cannot release seats");
+        full.stopServices={{5,Direction::Idle}};
+        auto score=dispatcher.ScoreSnapshot(10,Direction::Up,full);
+        tests.Check(score.feasible && score.projectedOccupancy==1,"one distinct car call releases one seat");
+        tests.Near(score.eta,21,"18 travel plus one T");
+        tests.Check(!dispatcher.ScoreSnapshot(4,Direction::Up,full).feasible,"car call after pickup cannot release early");
+        score=dispatcher.ScoreSnapshot(5,Direction::Up,full);
+        tests.Check(score.feasible && score.projectedOccupancy==1,"same floor alights before pickup");
+        tests.Near(score.eta,11,"same floor transfer included");
     });
-    tests.Run("full car can free a seat before request", [&] {
-        auto full=Car(0,1,Direction::Up,{5}, {}, 2, 2);
-        full.stopServices.clear();
-        full.stopServices.push_back({5,Direction::Idle,1,0});
-        auto distant=Car(1,1); distant.moveTimePerFloor=10;
-        tests.Check(select(10,Direction::Up,{full,distant})==0,"projected alighting frees capacity");
+    tests.Run("each distinct car call releases at most one seat", [&] {
+        auto route=Car(0,3,Direction::Up,{5,6},{},3,3);
+        route.stopServices={{5,Direction::Idle},{5,Direction::Idle},{6,Direction::Idle}};
+        auto score=dispatcher.ScoreSnapshot(8,Direction::Up,route);
+        tests.Check(score.feasible && score.projectedOccupancy==1,"duplicate button cannot release another seat");
+        tests.Near(score.eta,16,"two distinct transfers plus ten travel");
     });
-    tests.Run("full car without an earlier alighting is rejected", [&] {
-        auto full=Car(0,1,Direction::Up,{5}, {}, 2, 2);
-        full.stopServices.clear();
-        full.stopServices.push_back({5,Direction::Idle,0,0});
-        tests.Check(select(10,Direction::Up,{full,Car(1,1)})==1,"still full at request");
+    tests.Run("earlier unknown hall consumes released seat", [&] {
+        auto route=Car(0,1,Direction::Up,{4,6},{},1,1);
+        route.stopServices={{4,Direction::Idle},{6,Direction::Up}};
+        tests.Check(!dispatcher.ScoreSnapshot(8,Direction::Up,route).feasible,"no invented destination after unknown pickup");
+        route.stopServices.pop_back(); route.upTasks={4};
+        tests.Check(dispatcher.ScoreSnapshot(8,Direction::Up,route).feasible,"cancellation recovers capacity");
     });
-    tests.Run("waiting five uses only two remaining seats", [&] {
-        auto route=Car(0,5,Direction::Up,{7,10}, {}, 8, 10);
-        route.stopServices.clear();
-        route.stopServices.push_back({7,Direction::Up,0,5});
-        route.stopServices.push_back({10,Direction::Idle,1,0});
-        // 移动 10 秒、只上 2 人 6 秒、请求层先下 1 人 3 秒；预计载荷 9/10。
-        // 成本 21.7 秒，优于空闲梯的 22.5 秒；若错误计 5 人上梯就会落败。
-        auto distant=Car(1,1); distant.moveTimePerFloor=2.5;
-        tests.Check(select(10,Direction::Up,{route,distant})==0,"boarding is capped by projected capacity");
-        CheckCost(tests,route,10,Direction::Up,21.7);
+    tests.Run("downward estimates use the same observable rules", [&] {
+        auto route=Car(0,15,Direction::Down,{}, {14,12},2,2);
+        route.stopServices={{14,Direction::Idle},{12,Direction::Down}};
+        tests.Check(!dispatcher.ScoreSnapshot(10,Direction::Down,route).feasible,"one release then one pickup fills car");
+        route.elevator.capacity=3;
+        CheckCost(tests,route,10,Direction::Down,18);
     });
-    tests.Run("waiting count changes intermediate ETA", [&] {
-        auto one=Car(0,5,Direction::Up,{7,10});
-        one.stopServices.clear();
-        one.stopServices.push_back({7,Direction::Up,0,1});
-        auto five=one; five.stopServices[0].boardingCount=5; five.elevator.id=0;
-        const auto alternate=Car(1,1);
-        tests.Check(select(10,Direction::Up,{one,alternate})==0,"one waiting passenger route wins");
-        tests.Check(select(10,Direction::Up,{five,alternate})==1,"five waiting passengers delay route");
-    });
-    tests.Run("boarding snapshot includes future alighting", [&] {
-        SimulationConfig config; config.capacity=1;
-        Elevator car(0,1,config);
-        tests.Check(car.AddHallCall(1,Direction::Up) && car.BeginBoarding(7,8),"begin boarding");
-        car.Advance(1.0);
-        const auto boarding=car.GetDispatchSnapshot();
-        bool found=false;
-        for(const auto& stop:boarding.stopServices)
-            if(stop.floor==8 && stop.direction==Direction::Idle && stop.alightingCount==1) found=true;
-        auto distant=Car(1,1); distant.moveTimePerFloor=3;
-        tests.Check(found && select(10,Direction::Up,{boarding,distant})==0,"pending target frees projected seat");
-    });
-    tests.Run("boarding reservation is not counted as another waiter", [&] {
-        auto boarding=Car(0,5,Direction::Up,{7,10}, {}, 0, 2);
-        boarding.elevator.state=ElevatorState::Boarding;
-        boarding.remainingActionTime=1;
-        boarding.reservedBoardingCount=1;
-        boarding.stopServices.clear();
-        boarding.stopServices.push_back({5,Direction::Up,0,0});
-        boarding.stopServices.push_back({7,Direction::Idle,0,0});
-        boarding.stopServices.push_back({10,Direction::Idle,0,0});
-        auto alternate=Car(1,1); alternate.moveTimePerFloor=2;
-        tests.Check(select(10,Direction::Up,{boarding,alternate})==0,"queue head reservation is not duplicated");
-    });
-    tests.Run("all projected cars full remain unassigned", [&] {
-        auto first=Car(0,1,Direction::Up,{5}, {}, 2, 2);
-        auto second=Car(1,6,Direction::Down,{}, {2}, 2, 2);
-        first.stopServices.clear();
-        second.stopServices.clear();
-        first.stopServices.push_back({5,Direction::Idle,0,0});
-        second.stopServices.push_back({2,Direction::Idle,0,0});
-        tests.Check(select(10,Direction::Up,{first,second})==InvalidElevatorId,"no projected seat");
-    });
-    tests.Run("opposite hall ahead fixes LOOK turnaround", [&] {
-        SimulationConfig config;
-        Elevator real(0,5,config); real.AddHallCall(8,Direction::Down);
-        auto route=real.GetDispatchSnapshot();
-        for(auto& stop:route.stopServices) stop.boardingCount=0;
-        // 真梯必须 5->8->3；空反向外呼不计传送时间，16 秒路程 + 5 秒方向成本。
-        tests.Near(RealPickupTime(real,3,Direction::Up),16,"real LOOK visits opposite call ahead");
-        CheckCost(tests,route,3,Direction::Up,21);
-    });
-    tests.Run("alighting is consumed once across both hall directions", [&] {
+    tests.Run("alighting consumed once across both hall directions", [&] {
         auto route=Car(0,3,Direction::Up,{5},{5,8},1,2);
-        route.stopServices={{5,Direction::Idle,1,0},{5,Direction::Down,0,0},
-            {8,Direction::Down,0,2,{2,2}}};
-        tests.Check(select(4,Direction::Down,{route})==InvalidElevatorId,
-            "5F alighting cannot free seats again after boarding at 8F");
-        route.stopServices.back().boardingCount=1;
-        route.stopServices.back().boardingTargetFloors={2};
-        // 移动 18 秒，下客/上客各 3 秒；到请求层 1/2 载荷 + 方向成本。
-        CheckCost(tests,route,4,Direction::Down,30.5);
+        route.stopServices={{5,Direction::Idle},{5,Direction::Down},{8,Direction::Down}};
+        tests.Check(!dispatcher.ScoreSnapshot(4,Direction::Down,route).feasible,
+            "5F cannot release again on return after two hall pickups");
     });
-    tests.Run("in-progress alighting uses remaining time only", [&] {
-        const auto real=AlightingCar(1);
-        tests.Near(RealPickupTime(real,6,Direction::Up),3,"1 remaining + 2 travel");
-        CheckCost(tests,real.GetDispatchSnapshot(),6,Direction::Up,3);
+    tests.Run("unknown hall does not invent a turnaround destination", [&] {
+        auto route=Car(0,5,Direction::Up,{6},{},0,2);
+        // 5->6->3，8 秒移动、一次外呼 3 秒、载荷 1.5、方向成本 5。
+        CheckCost(tests,route,3,Direction::Up,17.5);
     });
-    tests.Run("remaining alighting passengers all count", [&] {
-        const auto real=AlightingCar(3);
-        tests.Near(RealPickupTime(real,6,Direction::Up),9,"1 remaining + 2 full transfers + travel");
-        CheckCost(tests,real.GetDispatchSnapshot(),6,Direction::Up,9);
-        CheckCost(tests,real.GetDispatchSnapshot(),5,Direction::Up,7);
+    tests.Run("Boarding target is hidden until Boarded", [&] {
+        SimulationConfig config; config.capacity=1;
+        Elevator near(0,1,config), far(0,1,config);
+        near.AddHallCall(1,Direction::Up); far.AddHallCall(1,Direction::Up);
+        near.BeginBoarding(7,5); far.BeginBoarding(7,15);
+        near.Advance(1); far.Advance(1);
+        const auto a=near.GetDispatchSnapshot(), b=far.GetDispatchSnapshot();
+        tests.Check(a.upTasks==b.upTasks && a.downTasks==b.downTasks &&
+            a.stopServices.size()==1 && b.stopServices.size()==1,"pending targets absent from route and buttons");
+        tests.Check(!dispatcher.ScoreSnapshot(10,Direction::Up,a).feasible &&
+            !dispatcher.ScoreSnapshot(10,Direction::Up,b).feasible,"reserved last seat has no known release");
+        tests.Check(near.Advance(2).type==ElevatorEventType::Boarded &&
+            far.Advance(2).type==ElevatorEventType::Boarded,"complete real boarding");
+        tests.Check(dispatcher.ScoreSnapshot(10,Direction::Up,near.GetDispatchSnapshot()).feasible &&
+            !dispatcher.ScoreSnapshot(10,Direction::Up,far.GetDispatchSnapshot()).feasible,
+            "known car call may now affect capacity and ETA");
     });
-    tests.Run("boarding snapshot does not duplicate reserved queue head", [&] {
+    tests.Run("boarding reservation is counted once", [&] {
         SimulationConfig config; config.capacity=2;
         Elevator real(0,5,config); real.AddHallCall(5,Direction::Up);
         real.BeginBoarding(1,9); real.Advance(2);
-        tests.Near(RealPickupTime(real,6,Direction::Up),3,"only reserved passenger remaining second");
+        tests.Near(RealPickupTime(real,6,Direction::Up),3,"actual one remaining second plus travel");
         CheckCost(tests,real.GetDispatchSnapshot(),6,Direction::Up,4.5);
     });
-    tests.Run("known boarding destinations release future capacity", [&] {
-        auto route=Car(0,3,Direction::Up,{4}); route.elevator.capacity=2;
-        route.stopServices={{4,Direction::Up,0,2,{6,6}}};
-        // 3->8 为 10 秒，两人上/下共 12 秒，到 8F 空载。
-        CheckCost(tests,route,8,Direction::Up,22);
-        route.stopServices[0].boardingTargetFloors.clear();
-        tests.Check(select(8,Direction::Up,{route})==InvalidElevatorId,
-            "unknown destinations cannot invent released capacity");
+    tests.Run("in-progress alighting uses remaining time only", [&] {
+        const auto real=AlightingCar(1);
+        tests.Near(RealPickupTime(real,6,Direction::Up),3,"actual one remaining second plus travel");
+        CheckCost(tests,real.GetDispatchSnapshot(),6,Direction::Up,3);
     });
-    tests.Run("FIFO destinations determine who can board", [&] {
-        auto route=Car(0,3,Direction::Up,{4}); route.elevator.capacity=1;
-        route.stopServices={{4,Direction::Up,0,2,{6,12}}};
-        CheckCost(tests,route,8,Direction::Up,16);
-        route.stopServices[0].boardingTargetFloors={12,6};
-        tests.Check(select(8,Direction::Up,{route})==InvalidElevatorId,
-            "cannot skip far-destination queue head for second passenger");
+    tests.Run("unknown same-floor alighting count is not predicted", [&] {
+        const auto real=AlightingCar(3);
+        tests.Near(RealPickupTime(real,6,Direction::Up),9,"actual still serves all three people");
+        CheckCost(tests,real.GetDispatchSnapshot(),6,Direction::Up,3.4);
+        CheckCost(tests,real.GetDispatchSnapshot(),5,Direction::Up,1.4);
     });
-    tests.Run("downward FIFO releases capacity at destinations", [&] {
-        auto route=Car(0,15,Direction::Down,{}, {14},0,2);
-        route.stopServices={{14,Direction::Down,0,2,{12,12}}};
-        CheckCost(tests,route,10,Direction::Down,22);
+    tests.Run("car call distribution does not expose exact alighting counts", [&] {
+        SimulationConfig config;
+        Elevator a(0,1,config), b(0,1,config);
+        for(auto* car:{&a,&b}) car->AddHallCall(1,Direction::Up);
+        for(int id=0;id<3;++id) {
+            a.BeginBoarding(id,id<2 ? 5 : 15); a.Advance(config.personTime);
+            b.BeginBoarding(id,id<1 ? 5 : 15); b.Advance(config.personTime);
+        }
+        a.FinishStop(); b.FinishStop();
+        const auto left=dispatcher.ScoreSnapshot(10,Direction::Up,a.GetDispatchSnapshot());
+        const auto right=dispatcher.ScoreSnapshot(10,Direction::Up,b.GetDispatchSnapshot());
+        tests.Check(left.feasible && right.feasible && left.eta==right.eta && left.cost==right.cost &&
+            left.projectedOccupancy==2 && right.projectedOccupancy==2,"same buttons and load give exactly same score");
     });
-    tests.Run("new passengers can alight at a previously serviced floor", [&] {
-        auto route=Car(0,3,Direction::Up,{5},{8},1,2);
-        route.stopServices={{5,Direction::Idle,1,0},{8,Direction::Down,0,1,{5}}};
-        // 5F 的原乘客消费后清零；8F 新上梯者产生另一批 5F 下客事件。
-        CheckCost(tests,route,4,Direction::Down,32);
+    tests.Run("observable preview remains read-only and deterministic", [&] {
+        const auto route=Car(0,3,Direction::Up,{4},{},0,2);
+        for(int repeat=0;repeat<10;++repeat) CheckCost(tests,route,8,Direction::Up,14.5);
+        tests.Check(route.upTasks==std::vector<int>({4}) && route.elevator.passengerCount==0 &&
+            route.stopServices.size()==1,"preview leaves source unchanged");
     });
-    tests.Run("FIFO destinations change turnaround ETA", [&] {
-        auto route=Car(0,5,Direction::Up,{6},{},0,2);
-        route.stopServices={{6,Direction::Up,0,3,{7,8,14}}};
-        // 前两人到 7/8F，后一个不登梯；5->8->3=16 秒，4 次传送=12 秒。
-        CheckCost(tests,route,3,Direction::Up,33);
-        route.stopServices[0].boardingTargetFloors={14,7,8};
-        CheckCost(tests,route,3,Direction::Up,57);
+    tests.Run("invalid stop metadata rejected", [&] {
+        auto route=Car(0,3); route.stopServices={{21,Direction::Up}};
+        tests.Check(!dispatcher.ScoreSnapshot(8,Direction::Up,route).feasible,"above building");
+        route.stopServices={{0,Direction::Idle}};
+        tests.Check(!dispatcher.ScoreSnapshot(8,Direction::Up,route).feasible,"below building");
     });
-    tests.Run("load cost uses occupancy at request", [&] {
-        auto route=Car(0,5,Direction::Up,{6},{},2,2);
-        route.stopServices={{6,Direction::Idle,2,0}};
-        // 到 8F 前两人下客：ETA=12，预计空载；按当前满载加 T 会错选空闲梯。
-        CheckCost(tests,route,8,Direction::Up,12);
-        route=Car(0,5,Direction::Up,{6},{},0,2);
-        route.stopServices={{6,Direction::Up,0,1,{12}}};
-        CheckCost(tests,route,8,Direction::Up,10.5);
-    });
-    tests.Run("known FIFO services remain read-only and deterministic", [&] {
-        const auto original=Car(0,3,Direction::Up,{4},{},0,2);
-        auto route=original; route.stopServices={{4,Direction::Up,0,2,{6,6}}};
-        for(int repeat=0;repeat<10;++repeat) CheckCost(tests,route,8,Direction::Up,22);
-        tests.Check(route.stopServices[0].boardingCount==2 && route.stopServices[0].alightingCount==0 &&
-            route.stopServices[0].boardingTargetFloors==std::vector<int>({6,6}) &&
-            route.upTasks==original.upTasks && route.downTasks==original.downTasks &&
-            route.elevator.passengerCount==0,"preview does not consume source snapshot");
-    });
-    tests.Run("invalid FIFO destination metadata rejected", [&] {
-        auto route=Car(0,3,Direction::Up,{4});
-        route.stopServices={{4,Direction::Up,0,1,{2}}};
-        tests.Check(select(8,Direction::Up,{route})==InvalidElevatorId,"wrong direction");
-        route.stopServices[0].boardingTargetFloors={21};
-        tests.Check(select(8,Direction::Up,{route})==InvalidElevatorId,"above building");
-        route.stopServices[0].boardingTargetFloors={6,7};
-        tests.Check(select(8,Direction::Up,{route})==InvalidElevatorId,"more targets than waiters");
-    });
-    tests.Run("ETA agrees with real LOOK across mixed task routes", [&] {
-        // 108 组混合内呼/双向外呼、层间剩余时间、前方/后方请求，直接对照真实状态机。
+    tests.Run("estimated LOOK preserves real mixed route travel", [&] {
+        // 108 组混合路线：未知外呼增加服务估计，但不会少走真实 LOOK 的扫描路程。
         for(int start:{2,5,10}) for(int target:{3,8,12})
             for(Direction initial:{Direction::Up,Direction::Down})
-                for(int request:{2,5,11}) for(Direction direction:{Direction::Up,Direction::Down})
-                {
+                for(int request:{2,5,11}) for(Direction direction:{Direction::Up,Direction::Down}) {
                     SimulationConfig config; Elevator real(0,start,config);
                     real.AddHallCall(target,initial); real.AddInternalTarget(7);
                     real.AddHallCall(9,Direction::Down); real.AddHallCall(4,Direction::Up);
                     real.Advance(0.5);
-                    auto route=real.GetDispatchSnapshot();
-                    for(auto& stop:route.stopServices) stop.boardingCount=0;
-                    const bool ahead=route.elevator.direction==Direction::Up ? request>start : request<start;
-                    const bool onWay=route.elevator.direction==direction &&
-                        (ahead || (!route.betweenFloors && request==start));
-                    const double actual=RealPickupTime(real,request,direction);
-                    CheckCost(tests,route,request,direction,actual+(onWay ? 0.0 : 5.0));
+                    const auto score=dispatcher.ScoreSnapshot(request,direction,real.GetDispatchSnapshot());
+                    const double travel=RealPickupTime(real,request,direction);
+                    tests.Check(score.feasible && score.eta>=travel && score.eta<=travel+5*config.personTime,
+                        "same travel with bounded estimated button service");
                 }
     });
     tests.Run("aging bonus grows and is capped", [&] {
@@ -432,7 +354,7 @@ int main()
         tests.Check(select(10,Direction::Up,{a})==-1,"no integer overflow at unknown upper bound");
     });
     tests.Run("reassign only for a material ETA improvement", [&] {
-        const auto request=Call(10,Direction::Up,{15});
+        const auto request=Call(10,Direction::Up);
         const auto owner=Car(0,1,Direction::Up,{10});
         tests.Check(dispatcher.SelectReassignment(request,0,{owner,Car(1,6)},20)==1,"18s to 8s qualifies");
         tests.Check(dispatcher.SelectReassignment(request,0,{owner,Car(1,3)},20)==0,"4s gain below 5s threshold");
@@ -440,7 +362,7 @@ int main()
         tests.Check(dispatcher.SelectReassignment(request,0,{owner,boundary},20)==1,"exactly 5s gain qualifies");
     });
     tests.Run("near and serving owners are protected", [&] {
-        const auto request=Call(10,Direction::Up,{15});
+        const auto request=Call(10,Direction::Up);
         auto owner=Car(0,9,Direction::Up,{10}); owner.remainingActionTime=50;
         owner.elevator.state=ElevatorState::MovingUp; owner.betweenFloors=true; owner.moveTimePerFloor=60;
         tests.Check(dispatcher.SelectReassignment(request,0,{owner,Car(1,10)},20)==0,"one floor proximity lock");
@@ -452,7 +374,7 @@ int main()
         tests.Check(dispatcher.SelectReassignment(request,0,{owner,Car(1,10)},20)==0,"alighting at request locked");
     });
     tests.Run("reassignment cooldown prevents oscillation", [&] {
-        const auto request=Call(10,Direction::Up,{15});
+        const auto request=Call(10,Direction::Up);
         const std::vector<ElevatorDispatchSnapshot> cars{Car(0,1),Car(1,6)};
         int owner=dispatcher.SelectReassignment(request,0,cars,20);
         tests.Check(owner==1,"initial reassignment");
@@ -463,7 +385,7 @@ int main()
         tests.Check(dispatcher.SelectReassignment(request,1,changed,30,20)==0,"cooldown expires at physical event");
     });
     tests.Run("departed request floor does not lock reassignment", [&] {
-        const auto request=Call(10,Direction::Up,{15});
+        const auto request=Call(10,Direction::Up);
         auto owner=Car(0,10,Direction::Up,{10,18});
         owner.elevator.state=ElevatorState::MovingUp; owner.betweenFloors=true; owner.remainingActionTime=1;
         tests.Check(dispatcher.ScoreSnapshot(10,Direction::Up,owner).feasible,"departed owner still feasible after reversal");
@@ -471,7 +393,7 @@ int main()
         tests.Check(dispatcher.SelectReassignment(request,0,{owner,Car(1,10)},20,19)==0,"feasible departed owner still has cooldown");
     });
     tests.Run("one floor away while departing is not proximity protected", [&] {
-        const auto request=Call(10,Direction::Up,{15});
+        const auto request=Call(10,Direction::Up);
         auto below=Car(0,9,Direction::Down,{10},{2});
         below.elevator.state=ElevatorState::MovingDown; below.betweenFloors=true; below.remainingActionTime=1;
         auto above=Car(0,11,Direction::Up,{10,18});
@@ -483,11 +405,11 @@ int main()
         auto approaching=Car(0,11,Direction::Down,{}, {10});
         approaching.elevator.state=ElevatorState::MovingDown; approaching.betweenFloors=true;
         approaching.moveTimePerFloor=10; approaching.remainingActionTime=8;
-        tests.Check(dispatcher.SelectReassignment(Call(10,Direction::Down,{5}),0,{approaching,Car(1,10)},20)==0,
+        tests.Check(dispatcher.SelectReassignment(Call(10,Direction::Down),0,{approaching,Car(1,10)},20)==0,
             "downward approach also protected despite eight second gain");
     });
     tests.Run("infeasible owner bypasses cooldown and approaching protection", [&] {
-        const auto request=Call(10,Direction::Up,{15});
+        const auto request=Call(10,Direction::Up);
         auto owner=Car(0,9,Direction::Up,{10,20},{},1,1);
         owner.elevator.state=ElevatorState::MovingUp; owner.betweenFloors=true; owner.remainingActionTime=1;
         tests.Check(!dispatcher.ScoreSnapshot(10,Direction::Up,owner).feasible,"full through pickup floor");
@@ -496,7 +418,7 @@ int main()
         tests.Check(dispatcher.SelectReassignment(request,0,{owner,owner},20,19)==0,"no feasible alternative keeps owner");
     });
     tests.Run("actual landing service remains locked even if infeasible", [&] {
-        const auto request=Call(10,Direction::Up,{15});
+        const auto request=Call(10,Direction::Up);
         for(auto state:{ElevatorState::Stopped,ElevatorState::Boarding,ElevatorState::Alighting})
         {
             auto owner=Car(0,10,Direction::Up,{10},{},1,1);
@@ -504,9 +426,9 @@ int main()
             if(state==ElevatorState::Boarding)
             {
                 owner.elevator.passengerCount=0; owner.reservedBoardingCount=1;
-                owner.stopServices.push_back({15,Direction::Idle,1,0});
+                owner.stopServices.push_back({15,Direction::Idle});
             }
-            if(state==ElevatorState::Alighting) owner.stopServices.push_back({10,Direction::Idle,1,0});
+            if(state==ElevatorState::Alighting) owner.stopServices.push_back({10,Direction::Idle});
             owner.personTime=10;
             owner.remainingActionTime=state==ElevatorState::Stopped ? 0 : 8;
             const auto score=dispatcher.ScoreSnapshot(10,Direction::Up,owner);
@@ -519,12 +441,11 @@ int main()
     tests.Run("joint assignment beats a fixed greedy counterexample", [&] {
         const std::vector<ElevatorDispatchSnapshot> cars{Car(0,5),Car(1,1)};
         const std::vector<HallCallDispatchSnapshot> requests{
-            Call(4,Direction::Up,{20},0),Call(6,Direction::Up,{20},1)};
+            Call(4,Direction::Up,0),Call(6,Direction::Up,1)};
         const auto first=dispatcher.SelectFromSnapshots(4,Direction::Up,cars);
         SimulationConfig config; config.capacity=10;
         Elevator greedyFirst(0,5,config); greedyFirst.AddHallCall(4,Direction::Up);
         auto accepted=greedyFirst.GetDispatchSnapshot();
-        for(auto& stop:accepted.stopServices) if(stop.direction==Direction::Up) stop.boardingTargetFloors={20};
         const auto second=dispatcher.SelectFromSnapshots(6,Direction::Up,{accepted,cars[1]});
         tests.Check(first==0 && second==1,"greedy E1 then E2");
         const double greedy=dispatcher.ScoreSnapshot(4,Direction::Up,cars[0]).cost+
@@ -537,7 +458,7 @@ int main()
     tests.Run("three request search is bounded and deterministic", [&] {
         const std::vector<ElevatorDispatchSnapshot> cars{Car(0,2),Car(1,6),Car(2,10)};
         const std::vector<HallCallDispatchSnapshot> calls{
-            Call(2,Direction::Up,{3},0),Call(6,Direction::Up,{7},1),Call(10,Direction::Down,{9},2)};
+            Call(2,Direction::Up,0),Call(6,Direction::Up,1),Call(10,Direction::Down,2)};
         const auto plan=dispatcher.PlanAssignments(calls,cars,0);
         tests.Check(plan.elevatorIndices==std::vector<int>({0,1,2}) && plan.assignedCount==3,"three immediate pickups");
         tests.Near(plan.totalCost,0,"no travel or earlier service");
@@ -546,51 +467,61 @@ int main()
         for(int repeat=0;repeat<5;++repeat)
             tests.Check(dispatcher.PlanAssignments(calls,cars,0).elevatorIndices==plan.elevatorIndices,"stable tie breaks");
         tests.Check(cars[0].upTasks.empty() && cars[0].elevator.state==ElevatorState::Idle &&
-            calls[0].targetFloors==std::vector<int>({3}),"search only changes local copies");
+            calls[0].floor==2 && calls[0].direction==Direction::Up,"search only changes local copies");
     });
     tests.Run("joint search selects oldest three even if input unsorted", [&] {
-        const auto plan=dispatcher.PlanAssignments({Call(2,Direction::Up,{3},0,30),Call(4,Direction::Up,{5},1,0),
-            Call(6,Direction::Up,{7},2,10),Call(8,Direction::Up,{9},3,20)},
+        const auto plan=dispatcher.PlanAssignments({Call(2,Direction::Up,0,30),Call(4,Direction::Up),
+            Call(6,Direction::Up,2,10),Call(8,Direction::Up,3,20)},
             {Car(0,2),Car(1,4),Car(2,6),Car(3,8)},40);
         tests.Check(plan.assignedCount==3 && plan.elevatorIndices[0]==InvalidElevatorId,"fourth newest waits");
         tests.Check(plan.evaluatedCombinations<=64,"large input does not grow batch");
     });
-    tests.Run("joint requests may share a car with future capacity", [&] {
-        const auto plan=dispatcher.PlanAssignments({Call(2,Direction::Up,{3},0),Call(4,Direction::Up,{5},1),
-            Call(6,Direction::Up,{7},2)}, {Car(0,1,Direction::Idle,{}, {},0,1)},0);
+    tests.Run("joint requests share current spare capacity without invented releases", [&] {
+        const auto plan=dispatcher.PlanAssignments({Call(2,Direction::Up,0),Call(4,Direction::Up,1),
+            Call(6,Direction::Up,2)}, {Car(0,1,Direction::Idle,{}, {},0,3)},0);
         tests.Check(plan.elevatorIndices==std::vector<int>({0,0,0}),"all three fit along one route");
-        tests.Near(plan.totalEta,36,"ETA 2 + 12 + 22 includes prior boarding and drops");
-        tests.Near(plan.maxEta,22,"latest pickup");
+        tests.Near(plan.totalEta,27,"ETA 2 + 9 + 16 includes one T per earlier hall");
+        tests.Near(plan.maxEta,16,"latest pickup");
     });
     tests.Run("final joint route reevaluates earlier request costs", [&] {
-        const auto plan=dispatcher.PlanAssignments({Call(6,Direction::Up,{7},0),Call(2,Direction::Up,{3},1)},
-            {Car(0,1,Direction::Idle,{}, {},0,1)},0);
+        const auto plan=dispatcher.PlanAssignments({Call(6,Direction::Up,0),Call(2,Direction::Up,1)},
+            {Car(0,1,Direction::Idle,{}, {},0,2)},0);
         tests.Check(plan.assignedCount==2,"same car route feasible");
-        tests.Near(plan.totalCost,18,"older 6F ETA becomes 16 after adding 2F service; not 10+2");
+        tests.Near(plan.totalCost,16.5,"older 6F ETA becomes 13 plus load 1.5; 2F costs 2");
     });
     tests.Run("insufficient capacity leaves partial plan", [&] {
-        const auto plan=dispatcher.PlanAssignments({Call(4,Direction::Up,{8},0),Call(5,Direction::Up,{9},1)},
+        const auto plan=dispatcher.PlanAssignments({Call(4,Direction::Up,0),Call(5,Direction::Up,1)},
             {Car(0,1,Direction::Idle,{}, {},0,1),Car(1,2,Direction::Up,{20},{},1,1)},0);
         tests.Check(plan.assignedCount==1 && plan.elevatorIndices==std::vector<int>({0,-1}),"cannot fill same seat twice");
-        const auto empty=dispatcher.PlanAssignments({Call(4,Direction::Up,{8})},{Car(0,1,Direction::Up,{20},{},1,1)},0);
+        const auto empty=dispatcher.PlanAssignments({Call(4,Direction::Up)},{Car(0,1,Direction::Up,{20},{},1,1)},0);
         tests.Check(empty.assignedCount==0 && empty.elevatorIndices[0]==-1,"all infeasible stays pending");
+    });
+    tests.Run("joint assignment reuses observable capacity feasibility", [&] {
+        auto full=Car(0,1,Direction::Up,{5},{},1,1);
+        const auto blocked=dispatcher.PlanAssignments({Call(10,Direction::Up)},{full},0);
+        tests.Check(blocked.assignedCount==0 && blocked.elevatorIndices[0]==InvalidElevatorId,
+            "full car without an earlier car call stays infeasible");
+        full.stopServices={{5,Direction::Idle}};
+        const auto released=dispatcher.PlanAssignments({Call(10,Direction::Up)},{full},0);
+        tests.Check(released.assignedCount==1 && released.elevatorIndices[0]==0,
+            "same ScoreSnapshot release estimate makes the joint candidate feasible");
     });
     tests.Run("aging remains active in joint cost", [&] {
         const std::vector<ElevatorDispatchSnapshot> cars{Car(0,11,Direction::Down,{}, {10}),Car(1,6)};
-        const std::vector<HallCallDispatchSnapshot> calls{Call(10,Direction::Up,{15})};
+        const std::vector<HallCallDispatchSnapshot> calls{Call(10,Direction::Up)};
         tests.Check(dispatcher.PlanAssignments(calls,cars,0).elevatorIndices[0]==1,"fresh prefers idle");
         tests.Check(dispatcher.PlanAssignments(calls,cars,200).elevatorIndices[0]==0,"aging admits reverse route");
     });
     tests.Run("large fleet still respects joint search bound", [&] {
         std::vector<ElevatorDispatchSnapshot> cars;
         for(int id=0;id<60;++id) cars.push_back(Car(id,id%18+1));
-        const auto plan=dispatcher.PlanAssignments({Call(4,Direction::Up,{8},0),Call(9,Direction::Down,{2},1),
-            Call(15,Direction::Up,{19},2)},cars,0);
+        const auto plan=dispatcher.PlanAssignments({Call(4,Direction::Up,0),Call(9,Direction::Down,1),
+            Call(15,Direction::Up,2)},cars,0);
         tests.Check(plan.assignedCount==3 && plan.evaluatedCombinations<=64,"60 cars do not cause 60 cubed search");
         tests.Check(plan.scoreEvaluations<=21*cars.size()+192,"candidate scan is linear in fleet size");
     });
     tests.Run("joint ties use IDs rather than input order", [&] {
-        const std::vector<HallCallDispatchSnapshot> calls{Call(5,Direction::Up,{20})};
+        const std::vector<HallCallDispatchSnapshot> calls{Call(5,Direction::Up)};
         tests.Check(dispatcher.PlanAssignments(calls,{Car(9,1),Car(2,1)},0).elevatorIndices[0]==1,"lower ID selected");
         tests.Check(dispatcher.PlanAssignments(calls,{Car(2,1),Car(9,1)},0).elevatorIndices[0]==0,"stable after permutation");
     });
@@ -598,9 +529,7 @@ int main()
         SimulationConfig config; config.capacity=1;
         Elevator owner(0,1,config); owner.AddInternalTarget(20); owner.AddHallCall(5,Direction::Up);
         auto before=owner.GetDispatchSnapshot();
-        for(auto& service:before.stopServices)
-            if(service.floor==5 && service.direction==Direction::Up) service.boardingTargetFloors={20};
-        const auto request=Call(10,Direction::Up,{15},42,7);
+        const auto request=Call(10,Direction::Up,42,7);
         tests.Check(!dispatcher.ScoreSnapshot(10,Direction::Up,before,7,100).feasible,"known pickup consumes only seat");
         tests.Check(owner.RemoveHallCall(5,Direction::Up),"route cancellation accepted");
         const auto after=owner.GetDispatchSnapshot();
